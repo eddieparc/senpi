@@ -1,5 +1,11 @@
 # Builtin compaction extension changes
 
+## Skip Cursor compaction while the session is not idle (2026-08-19)
+
+Blocking and generated apply refuse `cursor` / `cursor-cli-oauth` when `!ctx.isIdle()`. Mid-run Cursor compact poisons `conversationId`. Idle `agent_end` / `pre_prompt` still compact.
+
+Conflict zone: `applyBlockingCompaction`, `applyGeneratedCompaction`.
+
 ## Stand down silently when a compaction request is aborted (2026-08-16)
 
 ### What changed

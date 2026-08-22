@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "../../types.ts";
 import type { ResumptionChannelCounts } from "./monitor-continuation-types.ts";
+import { isStaleExtensionContextError } from "./stale-context.ts";
 import { formatGoalWaitLabel, type GoalWaitKind, type GoalWaitLabelInput } from "./wait-progress.ts";
 
 /** Footer countdown refresh cadence while a Goal continuation is delayed. */
@@ -72,7 +73,31 @@ export class GoalWaitTicker {
 		this.ctx = undefined;
 		this.kind = undefined;
 		this.lastRenderedStatus = undefined;
-		if (ctx !== undefined) this.render(ctx, undefined);
+		if (ctx !== undefined) {
+			try {
+				this.render(ctx, undefined);
+			} catch (error) {
+				// A stale ctx cannot clear its own footer status; dropping it is enough.
+				if (!isStaleExtensionContextError(error)) throw error;
+			}
+		}
+	}
+
+	/**
+	 * Drop the interval and retained ctx without a final render. Used when a tick
+	 * discovers the ctx was retired by a session replacement or reload: every
+	 * render against it throws from now on, and a ticker that keeps ticking dead
+	 * renders freezes the footer forever without crashing. The next sync() with a
+	 * live ctx re-arms everything.
+	 */
+	private retire(): void {
+		if (this.intervalId !== undefined) {
+			clearInterval(this.intervalId);
+			this.intervalId = undefined;
+		}
+		this.ctx = undefined;
+		this.kind = undefined;
+		this.lastRenderedStatus = undefined;
 	}
 
 	private tick(): void {
@@ -85,6 +110,14 @@ export class GoalWaitTicker {
 		});
 		if (status === this.lastRenderedStatus) return;
 		this.lastRenderedStatus = status;
-		this.render(this.ctx, status);
+		try {
+			this.render(this.ctx, status);
+		} catch (error) {
+			if (isStaleExtensionContextError(error)) {
+				this.retire();
+				return;
+			}
+			throw error;
+		}
 	}
 }

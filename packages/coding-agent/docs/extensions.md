@@ -375,7 +375,8 @@ user sends another prompt ◄─────────────────
 
 /compact or auto-compaction
   ├─► session_before_compact (can cancel or customize)
-  └─► session_compact
+  ├─► session_compact (success)
+  └─► session_compact_failed (failure or abort)
 
 /tree navigation
   ├─► session_before_tree (can cancel or customize)
@@ -510,7 +511,7 @@ pi.on("session_before_reload", () => {
 
 Use this to protect state a reload would destroy — for example running background children owned by the extension runtime. Keep handlers fast and side-effect free; hosts may consult the veto more than once per reload attempt.
 
-#### session_before_compact / session_compact
+#### session_before_compact / session_compact / session_compact_failed
 
 Fired on compaction. See [compaction.md](compaction.md) for details.
 
@@ -546,6 +547,14 @@ pi.on("session_compact", async (event, ctx) => {
   // event.fromExtension - whether extension provided it
   // event.reason - "manual" (/compact), "threshold", or "overflow"
   // event.willRetry - whether the aborted turn is retried after compaction (overflow recovery)
+});
+
+pi.on("session_compact_failed", async (event, ctx) => {
+  // event.reason - "manual" (/compact), "threshold", or "overflow"
+  // event.errorMessage - present for non-abort failures
+  // event.aborted - true for cancelled/aborted compactions
+  // event.willRetry - whether the aborted turn would have retried after compaction
+  // event.fromExtension - whether extension-provided compaction content was being used
 });
 ```
 

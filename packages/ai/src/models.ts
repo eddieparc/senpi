@@ -763,6 +763,12 @@ export interface CreateProviderOptions<TApi extends Api = Api> {
 	models: readonly Model<TApi>[];
 	/** Fetch a dynamic model overlay. createProvider restores and publishes it transactionally. */
 	fetchModels?: (context: RefreshModelsContext) => Promise<readonly Model<TApi>[]>;
+	/**
+	 * Optional transform applied to restored stored models before publication,
+	 * letting a provider migrate an old catalog shape without a network refresh.
+	 * A throwing transform publishes the stored list unchanged.
+	 */
+	restoreModels?: (models: readonly Model<TApi>[]) => readonly Model<TApi>[];
 	filterModels?: (models: readonly Model<TApi>[], credential: Credential | undefined) => readonly Model<TApi>[];
 	/** Single implementation, or map keyed by `model.api` for mixed-API providers. */
 	api: ProviderStreams | Partial<Record<TApi, ProviderStreams>>;
@@ -816,9 +822,16 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 		refreshModels: fetchModels
 			? async (context) => {
 					if (context.stored) {
-						const restored = context.stored.models
+						let restored = context.stored.models
 							.filter((model) => model.provider === input.id)
 							.map((model) => model as Model<TApi>);
+						if (input.restoreModels) {
+							try {
+								restored = [...input.restoreModels(restored)];
+							} catch {
+								// The stored list is the last usable catalog; publish it unchanged.
+							}
+						}
 						if (
 							!(await context.publish({
 								update: () => {

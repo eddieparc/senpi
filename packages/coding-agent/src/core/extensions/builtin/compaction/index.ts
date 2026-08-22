@@ -400,6 +400,11 @@ export default function compactionExtension(
 		ctx: ExtensionContext,
 		customInstructions: string,
 	): Promise<SpeculativeCompactionResult> {
+		const provider = ctx.model?.provider;
+		if ((provider === "cursor" || provider === "cursor-cli-oauth") && !ctx.isIdle()) {
+			getLogger(ctx).debug("skip_cursor_mid_turn", { route: "blocking" });
+			return { applied: false, reason: "rejected" };
+		}
 		if (breaker.isTripped(state, Date.now())) {
 			getLogger(ctx).debug("skip_breaker", { route: "blocking" });
 			return { applied: false, reason: "rejected" };

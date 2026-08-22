@@ -13,6 +13,8 @@ import { formatGoalForTool, goalStatusLabel } from "./format.ts";
 import { isResumeOfStoppedGoal, queueGoalContinuation } from "./lifecycle-helpers.ts";
 import { GOAL_CONTINUATION_SCHEDULED_EVENT, MonitorAwareGoalContinuation } from "./monitor-continuation.ts";
 import { migrateLegacyGoalFile } from "./persistence.ts";
+import { reengageGoalAfterReload } from "./reload-reengagement.ts";
+import { isStaleExtensionContextError } from "./stale-context.ts";
 import { accountGoalUsage, readGoal, updateGoal } from "./store.ts";
 import { GOAL_STORE_CHANGED_EVENT, isGoalStoreChangedEvent } from "./store-changed-event.ts";
 import { goalStoreRef as buildGoalStoreRef } from "./store-ref.ts";
@@ -26,7 +28,6 @@ import { GOAL_WAIT_STATUS_KEY, GoalWaitTicker } from "./wait-ticker.ts";
 
 const RESUME_GOAL_CHOICE = "Resume goal";
 const LEAVE_GOAL_STOPPED_CHOICE = "Leave stopped";
-const STALE_EXTENSION_CONTEXT_ERROR_PREFIX = "This extension ctx is stale after session replacement or reload.";
 
 type AgentGoalAccounting = {
 	goalId: string;
@@ -42,15 +43,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let continuationPending = false;
 	let activeContext: ExtensionContext | undefined;
 	const turnUsage = new TurnUsageTracker();
+	// No stale-ctx swallow here: GoalWaitTicker retires itself on a stale render
+	// (a ticker that keeps ticking against a retired ctx freezes the footer
+	// countdown forever); non-stale render errors still propagate.
 	const goalWaitTicker = new GoalWaitTicker({
-		render: (renderCtx, status) => {
-			try {
-				renderCtx.ui.setStatus(GOAL_WAIT_STATUS_KEY, status);
-			} catch (error) {
-				if (error instanceof Error && error.message.startsWith(STALE_EXTENSION_CONTEXT_ERROR_PREFIX)) return;
-				throw error;
-			}
-		},
+		render: (renderCtx, status) => renderCtx.ui.setStatus(GOAL_WAIT_STATUS_KEY, status),
 	});
 	const monitorContinuation = new MonitorAwareGoalContinuation(
 		pi,
@@ -65,17 +62,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		goalStoreRef,
 		beginAgentGoalAccounting,
 		refreshGoalUi: refreshGoalUiBestEffort,
+		resumeAfterSuppressedLoad: (resumeCtx, goal) => queueGoalContinuationForCurrentSession(pi, resumeCtx, goal),
 	});
 
 	const goalTicker = new GoalElapsedTicker({
-		render: (renderCtx, renderGoal, live) => {
-			try {
-				updateGoalUi(renderCtx, renderGoal, live);
-			} catch (error) {
-				if (error instanceof Error && error.message.startsWith(STALE_EXTENSION_CONTEXT_ERROR_PREFIX)) return;
-				throw error;
-			}
-		},
+		render: (renderCtx, renderGoal, live) => updateGoalUi(renderCtx, renderGoal, live),
 	});
 
 	pi.registerEntryRenderer(GOAL_CACHE_WARMUP_ENTRY_TYPE, renderGoalCacheWarmupEntry);
@@ -145,14 +136,29 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (await maybePromptResumeStoppedGoal(pi, ctx, event.reason, goal)) {
 			return;
 		}
-		// A config reload must not auto-start an agent that was stopped. Only a fresh
-		// startup or explicit resume may re-engage an active goal via a continuation.
-		if (goal && event.reason !== "reload") {
+		if (goal && event.reason === "reload") {
+			// A reload retires the extension generation and every armed continuation
+			// timer with it. Re-engage through the reload path: stopped goals stay
+			// stopped, active goals resume the wait the reload tore down.
+			await reengageGoalAfterReload({
+				ctx,
+				goal,
+				monitor: monitorContinuation,
+				countTrailingContinuations: () => countTrailingGoalContinuationEntries(ctx.sessionManager.getBranch()),
+				queueContinuation: () => queueGoalContinuationForCurrentSession(pi, ctx, goal),
+			});
+		} else if (goal) {
 			// Migration-lite admission: a resumed session carrying a trailing flood of
 			// historical continuations must not reignite on load. Skip the auto-queue,
 			// leave the goal active (no status rewrite), and tell the user how to resume.
 			const trailingContinuations = countTrailingGoalContinuationEntries(ctx.sessionManager.getBranch());
 			if (trailingContinuations >= GOAL_CONTINUATION_CAP) {
+				// The load-time flood suppression parks the goal without rewriting its
+				// status, so the only resume signal left is the user's next message.
+				// Arm the one-shot latch the direct-input lifecycle fires when that
+				// message is accepted; without it the promise in the notice is a lie
+				// and the resumed session sits idle until the goal is recreated.
+				directInputLifecycle.armSuppressedLoadResume();
 				ctx.ui.notify(
 					`Goal auto-continuation suppressed for this resumed session (${trailingContinuations} historical continuations). Send a message to resume.`,
 					"info",
@@ -384,7 +390,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		try {
 			refreshGoalUi(ctx, goal);
 		} catch (error) {
-			if (error instanceof Error && error.message.startsWith(STALE_EXTENSION_CONTEXT_ERROR_PREFIX)) {
+			if (isStaleExtensionContextError(error)) {
 				return;
 			}
 			throw error;

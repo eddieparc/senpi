@@ -898,6 +898,21 @@ export interface SessionCompactRejectedEvent {
 	willRetry: false;
 }
 
+/** Fired after context compaction fails or is aborted */
+export interface SessionCompactFailedEvent {
+	type: "session_compact_failed";
+	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */
+	reason: "manual" | "threshold" | "overflow";
+	/** Error text when compaction failed for a non-abort reason. */
+	errorMessage?: string;
+	/** True when compaction was cancelled or aborted. */
+	aborted: boolean;
+	/** True when the aborted turn would have been retried after this compaction (overflow recovery) */
+	willRetry: boolean;
+	/** True when the failing compaction content came from a session_before_compact handler. */
+	fromExtension: boolean;
+}
+
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
@@ -957,6 +972,7 @@ export type SessionEvent =
 	| SessionBeforeReloadEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
+	| SessionCompactFailedEvent
 	| SessionShutdownEvent
 	| SessionAbortEvent
 	| SessionExtensionsRemovedEvent
@@ -1602,6 +1618,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
+	on(event: "session_compact_failed", handler: ExtensionHandler<SessionCompactFailedEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_abort", handler: ExtensionHandler<SessionAbortEvent>): void;
 	on(event: "session_extensions_removed", handler: ExtensionHandler<SessionExtensionsRemovedEvent>): void;
@@ -1684,11 +1701,17 @@ export interface ExtensionAPI {
 	/** Register a CLI flag. */
 	registerFlag(
 		name: string,
-		options: {
-			description?: string;
-			type: "boolean" | "string";
-			default?: boolean | string;
-		},
+		options:
+			| {
+					description?: string;
+					type: "boolean";
+					default?: boolean;
+			  }
+			| {
+					description?: string;
+					type: "string";
+					default?: string;
+			  },
 	): void;
 
 	/** Get the value of a registered CLI flag. */
@@ -1942,6 +1965,14 @@ export interface ProviderConfig {
 		/** Legacy synchronous credential-dependent model projection. */
 		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
 	};
+	/**
+	 * Deterministic usability gate for implicit fallback expansion. Return `false`
+	 * while this lane is guaranteed to refuse unattended execution (for example an
+	 * unacknowledged approval gate); the provider stays registered and explicitly
+	 * selectable, but bare-family fallback expansion skips it. Re-evaluated on
+	 * every expansion, so a settings change takes effect without re-registration.
+	 */
+	fallbackEligible?(): boolean;
 }
 
 /** Configuration for a model within a provider. */

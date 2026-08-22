@@ -6,6 +6,144 @@
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.22] - 2026-08-22
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.21-3] - 2026-08-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.21-2] - 2026-08-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.21] - 2026-08-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.20-2] - 2026-08-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.20] - 2026-08-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.19] - 2026-08-19
+
+### Breaking Changes
+
+### Added
+
+- Atomic `[Image #N]` editor markers for pasted images: a new `ImageMarkerRegistry` (ids only, never bytes) with contiguous renumbering, whole-marker deletion, registry snapshots for editor-to-editor transfer, and a paired optional image-marker API on `EditorComponent`, exported from the package index.
+
+- Optional paired `snapshotAttachmentState`/`restoreAttachmentState` owner hooks on `Editor` and `EditorComponent`: the editor's undo stack captures the caller's marker-keyed attachment payloads opaquely and restores them before the marker-order notification, so undoing a marker delete revives its image along with its text.
+
+### Changed
+
+### Fixed
+
+- `insertImageMarker()` now renumbers the visible markers to canonical `1..k` in reading order and returns the marker's final canonical id (previously the insertion counter), so a paste in front of an existing marker displays `[Image #1][Image #2]` instead of `[Image #2][Image #1]`, and the id the caller keys its payload under matches the number the user sees; `setText()` applies the same canonicalization after pruning so a surviving high id displays as `[Image #1]`.
+
+### Removed
+
+## [2026.8.18-3] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.18-2] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.18] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.17] - 2026-08-17
+
+### Breaking Changes
+
+### Added
+
 - Added a mixed `$` autocomplete surface that groups canonical commands before skills, filters both with one query,
   inserts the correct `/name` or `$name` syntax, and triggers from real editor input
   ([#909](https://github.com/code-yeongyu/senpi/pull/909)).

@@ -135,6 +135,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"create_goal",
 			"update_goal",
 			"get_goal",
+			"schedule_wakeup",
 		]);
 		expect(session.systemPrompt).toContain("- todo:");
 		expect(session.systemPrompt).not.toContain("- read:");

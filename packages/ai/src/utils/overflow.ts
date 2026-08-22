@@ -80,6 +80,17 @@ const NON_OVERFLOW_PATTERNS = [
 ];
 
 /**
+ * Cursor's api2.cursor.sh surfaces a context overflow as a bare gRPC
+ * `resource_exhausted` end-stream — the same wording its backend uses for
+ * quota and poisoned-conversation rejections. Token evidence disambiguates:
+ * a request that already streamed or billed tokens overflowed mid-flight,
+ * while a zero-token rejection is a quota/conversation failure that must stay
+ * on the rate-limit path (the cursor client rotates the conversation id for
+ * those and retry handling supplies the backoff).
+ */
+const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
+
+/**
  * Check if an assistant message represents a context overflow error.
  *
  * This handles three cases:
@@ -141,6 +152,12 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		if (!isNonOverflow && OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage!))) {
 			return true;
 		}
+		const usage = message.usage;
+		const hasTokenEvidence =
+			(usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite) > 0;
+		if (!isNonOverflow && hasTokenEvidence && RESOURCE_EXHAUSTED_PATTERN.test(message.errorMessage)) {
+			return true;
+		}
 	}
 
 	// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
@@ -178,4 +195,58 @@ export function isRecoverableLength(message: AssistantMessage, desiredMaxOutput:
  */
 export function getOverflowPatterns(): RegExp[] {
 	return [...OVERFLOW_PATTERNS];
+}
+
+function cursorZeroTokenCount(message: {
+	usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number };
+}): number {
+	const usage = message.usage;
+	if (!usage) return 0;
+	return (
+		usage.totalTokens || (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
+	);
+}
+
+export function isCursorPayloadResourceExhausted(
+	message: {
+		stopReason?: string;
+		errorMessage?: string;
+		usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number };
+	},
+	_estimateTokens: number,
+): boolean {
+	if (message.stopReason !== "error" || !/resource.?exhausted/i.test(message.errorMessage || "")) {
+		return false;
+	}
+	return !(cursorZeroTokenCount(message) > 0);
+}
+
+export function isCursorZeroTokenResourceExhausted(message: {
+	stopReason?: string;
+	errorMessage?: string;
+	usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; totalTokens?: number };
+}): boolean {
+	if (message.stopReason !== "error" || !/resource.?exhausted/i.test(message.errorMessage || "")) {
+		return false;
+	}
+	return !(cursorZeroTokenCount(message) > 0);
+}
+
+export function shouldSkipProviderFallbackForCursorZeroRe(options: { sameModelRemint?: boolean } | undefined): boolean {
+	return options?.sameModelRemint === true;
+}
+
+export function shouldRetryOverflowWithoutCompact(compacted: boolean, errorMessage: string): boolean {
+	if (compacted) return false;
+	return /Nothing to compact/i.test(errorMessage || "");
+}
+
+export function cursorOverflowCompactionSettings<T extends { keepRecentTokens?: number; restorationEnabled?: boolean }>(
+	settings: T,
+	provider: string | undefined,
+	reason: string | undefined,
+): T {
+	if (reason !== "overflow") return settings;
+	if (provider !== "cursor" && provider !== "cursor-cli-oauth") return settings;
+	return { ...settings, keepRecentTokens: 0, restorationEnabled: false };
 }

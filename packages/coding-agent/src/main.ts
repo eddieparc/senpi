@@ -10,7 +10,7 @@ import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import chalk from "chalk";
 import { handleAppServerCommand } from "./cli/app-server-command.ts";
-import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
 import {
 	type AuthCheckResult,
 	checkProviderAuth,
@@ -406,7 +406,7 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string,
 	}
 }
 
-async function createSessionManager(
+export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
@@ -552,6 +552,7 @@ function buildSessionOptions(
 			// Explicit --thinking still takes precedence (applied later).
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
+				options.thinkingSelection = resolved.thinkingSelection;
 				cliThinkingFromModel = true;
 			}
 		}
@@ -570,6 +571,7 @@ function buildSessionOptions(
 			// Use thinking level from scoped model config if explicitly set
 			if (!parsed.thinking && savedInScope.thinkingLevel) {
 				options.thinkingLevel = savedInScope.thinkingLevel;
+				options.thinkingSelection = savedInScope.thinkingSelection;
 			}
 		} else {
 			options.model = scopedModels[0].model;
@@ -577,6 +579,7 @@ function buildSessionOptions(
 			// Use thinking level from first scoped model if explicitly set
 			if (!parsed.thinking && scopedModels[0].thinkingLevel) {
 				options.thinkingLevel = scopedModels[0].thinkingLevel;
+				options.thinkingSelection = scopedModels[0].thinkingSelection;
 			}
 		}
 	}
@@ -584,6 +587,7 @@ function buildSessionOptions(
 	// Thinking level from CLI (takes precedence over scoped model thinking levels set above)
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
+		options.thinkingSelection = { level: parsed.thinking, source: "explicit" };
 	}
 
 	// Scoped models for Ctrl+P cycling
@@ -593,6 +597,7 @@ function buildSessionOptions(
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel,
+			thinkingSelection: sm.thinkingSelection,
 		}));
 	}
 
@@ -831,8 +836,8 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	if (parsed.name !== undefined) {
-		const name = parsed.name.trim();
-		if (!name) {
+		const name = normalizeSessionName(parsed.name);
+		if (name === undefined) {
 			console.error(chalk.red("Error: --name requires a non-empty value"));
 			process.exit(1);
 		}
@@ -1004,6 +1009,7 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionStartEvent,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
+			thinkingSelection: sessionOptions.thinkingSelection,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,

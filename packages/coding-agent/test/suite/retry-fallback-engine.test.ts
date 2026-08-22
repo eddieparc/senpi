@@ -707,6 +707,7 @@ describe("retry fallback engine", () => {
 			{ type: "turn_end" },
 			{ type: "agent_end", willRetry: false },
 			{ type: "agent_settled" },
+			{ type: "agent_idle" },
 		]);
 	});
 

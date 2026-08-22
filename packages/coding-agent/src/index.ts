@@ -28,6 +28,7 @@ export { type OAuthCredential, readStoredCredential } from "./core/auth-storage.
 export {
 	type BranchPreparation,
 	type BranchSummaryResult,
+	type CacheFriendlySummaryOptions,
 	type CollectEntriesResult,
 	type CompactionResult,
 	type CutPointResult,
@@ -173,6 +174,15 @@ export {
 	wrapRegisteredTool,
 	wrapRegisteredTools,
 } from "./core/extensions/index.ts";
+// Notice primitives
+export {
+	buildNoticeBox,
+	type NoticeLine,
+	type NoticeSpec,
+	type NoticeTone,
+	noticeEntryRenderer,
+	noticeMessageRenderer,
+} from "./core/extensions/notice/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
 export { convertToLlm } from "./core/messages.ts";

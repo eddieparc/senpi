@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ThinkingSelection } from "@earendil-works/pi-ai";
 import { type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
-import { createCursorExecBridge } from "./cursor-exec-bridge.ts";
+import { createSessionCursorExecBridge } from "./cursor-exec-bridge-session.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ServiceTier } from "./extensions/builtin/service-tier.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
@@ -17,6 +18,7 @@ import {
 	getModelNarrowingPatterns,
 	type InitialModelProvenance,
 	resolveModelScope,
+	resolveStoredModelReference,
 } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
@@ -64,10 +66,22 @@ export interface CreateAgentSessionOptions {
 	initialModelProvenance?: InitialModelProvenance;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
+	/** Provenance for a pre-resolved CLI/scoped/legacy selector. */
+	thinkingSelection?: ThinkingSelection;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
-	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel; serviceTier?: ServiceTier }>;
+	scopedModels?: Array<{
+		model: Model<any>;
+		thinkingLevel?: ThinkingLevel;
+		thinkingSelection?: ThinkingSelection;
+		serviceTier?: ServiceTier;
+	}>;
 	/** Favorite models for Ctrl+P cycling. */
-	favoriteModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel; serviceTier?: ServiceTier }>;
+	favoriteModels?: Array<{
+		model: Model<any>;
+		thinkingLevel?: ThinkingLevel;
+		thinkingSelection?: ThinkingSelection;
+		serviceTier?: ServiceTier;
+	}>;
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -248,13 +262,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let model = options.model;
 	let initialModelProvenance = options.initialModelProvenance;
 	let initialResolvedThinkingLevel: ThinkingLevel | undefined;
+	let initialThinkingSelection = options.thinkingSelection;
 	let modelFallbackMessage: string | undefined;
+
+	if (model) {
+		const resolved = resolveStoredModelReference(model.provider, model.id, modelRuntime);
+		if (resolved?.thinkingSelection) {
+			model = resolved.model;
+			initialResolvedThinkingLevel = resolved.thinkingLevel;
+			initialThinkingSelection ??= resolved.thinkingSelection;
+		}
+	}
 
 	// If session has data, try to restore model from it
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRuntime.getModel(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRuntime.hasConfiguredAuth(restoredModel.provider)) {
-			model = restoredModel;
+		const restored = resolveStoredModelReference(
+			existingSession.model.provider,
+			existingSession.model.modelId,
+			modelRuntime,
+		);
+		if (restored && modelRuntime.hasConfiguredAuth(restored.model.provider)) {
+			model = restored.model;
+			initialResolvedThinkingLevel = restored.thinkingLevel;
+			initialThinkingSelection = restored.thinkingSelection;
 		}
 		if (!model) {
 			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
@@ -274,6 +304,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		model = result.model;
 		initialModelProvenance = result.provenance;
 		initialResolvedThinkingLevel = result.thinkingLevel;
+		initialThinkingSelection = result.thinkingSelection;
 		if (!model) {
 			modelFallbackMessage = formatNoModelsAvailableMessage();
 		} else if (modelFallbackMessage) {
@@ -282,25 +313,43 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	let thinkingLevel = options.thinkingLevel ?? initialResolvedThinkingLevel;
+	let thinkingSelection =
+		options.thinkingSelection ??
+		(options.thinkingLevel !== undefined
+			? { level: options.thinkingLevel, source: "explicit" as const }
+			: undefined) ??
+		initialThinkingSelection;
 
-	// An exact-session thinking entry wins over settings. Otherwise resolve the selected model's
-	// remembered level before falling back to the global seed for never-seen models.
+	// An exact-session thinking entry wins over settings unless a real legacy alias already
+	// selected a level. Old entries have no provenance, including Cursor's synthetic off.
 	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
 		thinkingLevel = existingSession.thinkingLevel as ThinkingLevel;
+		thinkingSelection = existingSession.thinkingSelection;
 	}
 	if (thinkingLevel === undefined && model) {
-		thinkingLevel = settingsManager.getModelThinkingLevel(model.provider, model.id);
+		const remembered = settingsManager.getModelThinkingLevel(model.provider, model.id);
+		if (remembered !== undefined) {
+			thinkingLevel = remembered;
+			thinkingSelection = { level: remembered, source: "explicit" };
+		}
 	}
 	if (thinkingLevel === undefined) {
-		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		const configuredDefault = settingsManager.getDefaultThinkingLevel();
+		if (configuredDefault !== undefined) {
+			thinkingLevel = configuredDefault;
+			thinkingSelection = { level: configuredDefault, source: "explicit" };
+		} else {
+			thinkingLevel = DEFAULT_THINKING_LEVEL;
+		}
 	}
 
-	// Clamp to model capabilities
+	// Clamp to model capabilities without inventing provenance for a defaulted level.
 	if (!model) {
 		thinkingLevel = "off";
 	} else {
 		thinkingLevel = clampThinkingLevelToModel(thinkingLevel, model);
 	}
+	if (thinkingSelection) thinkingSelection = { ...thinkingSelection, level: thinkingLevel };
 
 	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
@@ -334,6 +383,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			systemPrompt: "",
 			model,
 			thinkingLevel,
+			thinkingSelection,
 			tools: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
@@ -397,27 +447,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		timeoutMs: settingsManager.getAgentStreamIdleTimeoutMs(),
 		streamStartTimeoutMs: settingsManager.getAgentStreamStartTimeoutMs(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-		cursorExecHandlers: createCursorExecBridge({
-			getTool: (name) => cursorBridgeSessionRef.current?.getRegisteredTool(name),
-			emitEvent: (event) => {
-				void agent.emitExternalEvent(event);
-			},
-			getAbortSignal: () => agent.signal,
-		}),
+		cursorExecHandlers: (runSignal: AbortSignal) =>
+			createSessionCursorExecBridge(cursorBridgeSessionRef, () => agent, runSignal),
 	});
+	// Agent core accepts the field in AgentState but older constructors may not copy it
+	// from initialState; assign the separately computed provenance explicitly.
+	agent.state.thinkingSelection = thinkingSelection;
 
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.state.messages = existingSession.messages;
 		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
+			sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 		}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
 			sessionManager.appendModelChange(model.provider, model.id);
 		}
-		sessionManager.appendThinkingLevelChange(thinkingLevel);
+		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 	}
 
 	const sessionStartEvent = initialModelProvenance

@@ -94,6 +94,25 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(rfcStyle, 200000)).toBe(true);
 	});
 
+	it("treats token-bearing resource_exhausted errors as context overflow", () => {
+		const message = createErrorMessage("Connect error resource_exhausted");
+		message.usage.output = 12;
+		message.usage.totalTokens = 12;
+		expect(isContextOverflow(message, 200_000)).toBe(true);
+	});
+
+	it("treats token-bearing gRPC trailer resource_exhausted errors as context overflow", () => {
+		const message = createErrorMessage("gRPC error 8: resource_exhausted");
+		message.usage.output = 3;
+		message.usage.totalTokens = 3;
+		expect(isContextOverflow(message, 200_000)).toBe(true);
+	});
+
+	it("keeps zero-token resource_exhausted errors out of overflow detection", () => {
+		const message = createErrorMessage("Connect error resource_exhausted: quota exceeded");
+		expect(isContextOverflow(message, 200_000)).toBe(false);
+	});
+
 	it("does not treat generic non-overflow Ollama errors as overflow", () => {
 		const message = createErrorMessage("500 `model runner crashed unexpectedly`");
 		expect(isContextOverflow(message, 32768)).toBe(false);

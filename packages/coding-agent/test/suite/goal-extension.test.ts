@@ -648,14 +648,18 @@ function textOf(result: { content?: Array<{ type: string; text?: string }> } | u
 }
 
 describe("goal extension reload does not auto-start a stopped agent", () => {
-	it("does not queue a continuation on session_start reason 'reload'", async () => {
+	it("does not queue a continuation on session_start reason 'reload' for a blocked goal", async () => {
 		const { tools, handlers, sent } = createGoalHarness();
 		const ctx = await makeCtx("thread-reload-noop");
 		await tools.get("create_goal")?.execute("c1", { objective: "Keep going" }, undefined, undefined, ctx);
+		await tools
+			.get("update_goal")
+			?.execute("u1", { status: "blocked", reason: "user interrupted the turn" }, undefined, undefined, ctx);
 
 		await runHandlers(handlers, "session_start", { type: "session_start", reason: "reload" }, ctx);
 
 		expect(sent).toHaveLength(0);
+		expect((await readGoal(storeRefFor(ctx)))?.status).toBe("blocked");
 	});
 
 	it("still queues a continuation on session_start reason 'startup'", async () => {
@@ -803,7 +807,7 @@ describe("goal extension session_start migration-lite admission", () => {
 
 	it("resumes normally on the next clean turn after a real user prompt follows a suppressed load", async () => {
 		vi.useFakeTimers();
-		const { tools, handlers, sent, continuationQueued } = createGoalHarness();
+		const { tools, handlers, sent } = createGoalHarness();
 		const notices: string[] = [];
 		const ctx = await makeNotifyingCtx(notices, "thread-suppressed-then-prompt", [
 			userMessageEntry(),
@@ -832,9 +836,10 @@ describe("goal extension session_start migration-lite admission", () => {
 			{ type: "agent_end", messages: [assistantMessageWithStopReason("stop")] },
 			ctx,
 		);
-		expect(sent).toHaveLength(0);
+		// The accepted user message after a suppressed load resumes the goal
+		// immediately, so the post-turn user-grace path has nothing left to do.
+		expect(sent).toHaveLength(1);
 		await vi.advanceTimersByTimeAsync(GOAL_USER_GRACE_DELAY_MS);
-		await continuationQueued;
 		expect(sent).toHaveLength(1);
 		expect(sent[0]?.message.customType).toBe("goal-continuation");
 		expect(await readGoal(storeRefFor(ctx))).toMatchObject({
@@ -844,7 +849,41 @@ describe("goal extension session_start migration-lite admission", () => {
 		vi.useRealTimers();
 	});
 
-	it("keeps reload sessions inert even with a flooded branch (no queue, no suppression notice)", async () => {
+	it("queues a continuation when the user sends a message after a suppressed flooded load", async () => {
+		// Repro of the resume-stuck report: a session whose branch ends in >= GOAL_CONTINUATION_CAP
+		// trailing continuations is suppressed at load (no continuation queued), and the notice says
+		// "Send a message to resume." When the user then sends that message, the goal must resume
+		// immediately instead of parking: the user message is the resume signal the notice promised.
+		const { tools, handlers, sent } = createGoalHarness();
+		const notices: string[] = [];
+		const ctx = await makeNotifyingCtx(notices, "thread-suppressed-then-user-message", [
+			userMessageEntry(),
+			...goalContinuationEntries(300),
+		]);
+		await tools.get("create_goal")?.execute("c1", { objective: "Keep going" }, undefined, undefined, ctx);
+
+		await runHandlers(handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+		expect(sent).toHaveLength(0);
+		expect(notices.some((n) => n.includes("suppressed for this resumed session"))).toBe(true);
+
+		await runHandlers(
+			handlers,
+			"input",
+			{ type: "input", inputId: "resume-after-suppression", text: "continue", source: "interactive" },
+			ctx,
+		);
+		await runHandlers(
+			handlers,
+			"input_disposition",
+			{ type: "input_disposition", inputId: "resume-after-suppression", disposition: "started" },
+			ctx,
+		);
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.message.customType).toBe("goal-continuation");
+	});
+
+	it("suppresses with a notice on reload when a flooded branch parks an active goal", async () => {
 		const { tools, handlers, sent } = createGoalHarness();
 		const notices: string[] = [];
 		const ctx = await makeNotifyingCtx(notices, "thread-flooded-reload", [
@@ -856,7 +895,9 @@ describe("goal extension session_start migration-lite admission", () => {
 		await runHandlers(handlers, "session_start", { type: "session_start", reason: "reload" }, ctx);
 
 		expect(sent).toHaveLength(0);
-		expect(notices).toEqual([]);
+		expect(notices).toContainEqual(
+			"Goal auto-continuation suppressed for this resumed session (300 historical continuations). Send a message to resume.",
+		);
 		expect((await readGoal(storeRefFor(ctx)))?.status).toBe("active");
 	});
 });

@@ -6,11 +6,223 @@
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.22] - 2026-08-22
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Cursor streams no longer fail while the server keeps sending heartbeats or checkpoints: the provider now matches the official Cursor CLI's stream recovery, refreshing its 30s health deadline on every inbound frame and silently retrying pre-`turnEnded` stalls or transport deaths with bounded backoff, resuming from the latest conversation checkpoint with the originally pinned model. Long-running local tools and long `xhigh` thinking turns previously died with `Cursor stream ended before turnEnded: inbound stream stalled` and immediately rotated the fallback chain.
+
+### Removed
+
+## [2026.8.21-3] - 2026-08-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.21-2] - 2026-08-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Cursor agent turns now finish promptly when `turnEnded` arrives even if the server leaves HTTP/2 open, while silent pre-completion streams fail after a heartbeat-aware health bound instead of freezing until the generic five-minute idle timeout.
+
+### Removed
+
+## [2026.8.21] - 2026-08-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- Refreshed hydrated provider catalog data: vercel-ai-gateway renamed the Grok vendor slug (`xai/grok-4.5|4.6` -> `spacexai/grok-4.5|4.6`) and opencode delisted `deepseek-v4-flash-free`; prompt-preset catalog sentinels track the new ids so releases no longer fail on this drift.
+- Handled the new `TOO_MANY_TOOL_CALLS` Gemini finish reason introduced by `@google/genai` 2.18.0, mapping it to an error stop reason.
+- Refreshed dependency pins (`@aws-sdk/client-bedrock-runtime`, `@google/genai`, `@smithy/node-http-handler`, `typebox`) and removed the unused `chalk`, `proxy-from-env`, and `@mistralai/mistralai` dependencies.
+
+### Fixed
+
+### Removed
+
+## [2026.8.20-2] - 2026-08-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.20] - 2026-08-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Skip ANTML invoke recovery when `model.api === "cursor-agent"` so native Cursor tool starts are not rejected as invalid event order ([#1013](https://github.com/code-yeongyu/senpi/pull/1013) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor MCP `task` complete no longer overwrites streamed arguments with `{}`; the last usable task args are kept ([#1017](https://github.com/code-yeongyu/senpi/pull/1017) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor conversation-id rotation now persists under the agent directory (`CODING_AGENT_DIR` or `~/.senpi/agent`) instead of `$HOME/cursor-conversation-ids.json`, so a reminted wire id survives TUI restart ([#998](https://github.com/code-yeongyu/senpi/pull/998) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor 0-token `resource_exhausted` surfaces on the first failure of a `stream()` call so the session layer can compact before any conversation-id rotation; rotation and same-stream retry apply only to later attempts ([#998](https://github.com/code-yeongyu/senpi/pull/998) by [@leeseunguk](https://github.com/leeseunguk)).
+- After Cursor conversation-id rotation is skipped at the 3-rotation cap, the next `stream()` remints a fresh wire id instead of failing the session with a poisoned-conversation error, and only the dead conversation is abandoned ([#998](https://github.com/code-yeongyu/senpi/pull/998) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor 0-token `resource_exhausted` is treated as overflow without a local-estimate floor, and Cursor overflow compaction keeps no recent-token tail so the retry payload actually shrinks ([#1015](https://github.com/code-yeongyu/senpi/pull/1015) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor billed `cacheRead` that dwarfs the live conversation window is ignored: checkpoint `usedTokens` is treated as the real context size when dashboard-cumulative `cache_read_tokens` is more than 3× that window, so compaction is not fired against a multi-million cache-read figure ([#985](https://github.com/code-yeongyu/senpi/pull/985) by [@leeseunguk](https://github.com/leeseunguk)).
+
+- Explicit Cursor thinking levels no longer die with `Connect error not_found`: Cursor's Run RPC
+  rejects bare capability ids (`kimi-k3`, `claude-fable-5`, …) with `not_found`, so
+  `resolveCursorSelectionDescriptor` now prefers the catalog-guaranteed suffix variant id
+  (`kimi-k3-high`, `claude-fable-5-thinking-low`) whenever a legacy alias exists, keeping bare
+  base id + ordered parameters only as the fallback for alias-less levels (#1008).
+
+### Removed
+
+## [2026.8.19] - 2026-08-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+- Upstream sync (`badlogic/pi-mono` main@`59a71b23`): adopted generalized thinking-token-budget fields (`thinkingTokenBudgetField`, `supportsThinkingTokenBudget`), Google thinking-level maps, Bedrock response smithy headers, Azure Responses tool-choice forwarding, and the simple tool-choice option. Fork pins (`openai@6.26.0`), Kimi top-level cached-token parsing, `-fast` priority-tier emission, and fork-only providers/catalog overlays are unchanged.
+- xAI now routes through the Responses API with Grok 4.6 as the provider default, matching upstream; fork xAI model specs are preserved.
+- Model catalog refreshed with upstream provider updates: Z.AI Chinese Coding Plan entries, Qwen Token Plan DeepSeek V4 Pro, Baseten GLM input modalities, and OpenRouter additions.
+
+### Fixed
+
+- Native Cursor turns now report real usage: the billed token split on `turnEnded`
+  (input/output/cache read/cache write, taken from the production cursor-agent schema) lands on
+  `usage`, and conversation checkpoints feed the server's live `usedTokens` into the in-flight
+  message so context accounting and the TUI meter move mid-turn instead of showing output-only
+  counts until turn end.
+
+- `resource_exhausted` errors that arrive after tokens already streamed are classified as context
+  overflow (compact-and-retry) instead of rate limit; zero-token `resource_exhausted` rejections
+  keep the rate-limit path so poisoned-conversation rotation still applies.
+
+### Removed
+- Deprecated Xiaomi models dropped, and the unused `@opentelemetry/api` dependency removed from `packages/ai` (no source imports it).
+
+## [2026.8.18-3] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+- Cursor context windows now track the models.dev first-party catalog capped by the context options
+  Cursor offers each family: current Claude families and GPT 5.5/5.6 report 1M, Grok 500K, Gemini Flash
+  1048576, and each request asks Cursor for the matching `context` token.
+
+- Cursor reasoning levels: the dynamic Cursor catalog now collapses the 204 account variant ids into
+  selectable base identities (Claude `base` / `base-thinking` boolean identities) with exact
+  `thinkingLevelMap` ladders, live-catalog context windows (Kimi K3 1048576, GLM 5.2 1M, GPT 272K,
+  Grok 256K, Claude 1M-label families 300K), and a shared cursor capability table derived from the
+  2026-08-18 AvailableModels capture; explicit thinking selections render into the protobuf
+  `RequestedModel.parameters` (per-family `thinking`/`context`/`effort`/`reasoning`/`fast` templates,
+  GPT 5.5 / Codex 5.3 `xhigh` → `extra-high`), absent selections keep the representative variant
+  request shape, and stored 204-variant catalogs migrate idempotently through the new
+  `restoreModels` provider hook. Adds `ThinkingSelection` provenance propagation through agent
+  state, loop turn updates, and the remote proxy.
+
+### Changed
+
+### Fixed
+
+- Cursor provider: advertised MCP tool schemas are now sanitized of JSON-Schema composition
+  keywords (`oneOf`/`anyOf`/`allOf`) before reaching the Run request — a single tool carrying one
+  (e.g. ast-grep MCP's `scan`) made Cursor's gateway reject the whole request with a wrapped
+  provider 400 (`resource_exhausted`, zero tokens) from turn 1.
+- Leaked-invoke recovery now resolves upstream wire-aliased tool names (ccapi
+  PascalCase disguises like `TaskSend`, CC-pool hashed prefixes like
+  `mcp_49f0-Todo`, CC-SDK `mcp__server__tool` forms), so a text-leaked
+  `<invoke name="mcp_49f0-Todo">` recovers into the registered `todo` tool
+  call instead of rendering as literal text. Alias collisions between
+  registered tools stay literal text.
+### Removed
+
+## [2026.8.18-2] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Model recovery now preserves Cursor's in-memory resolved-tool marker on native tool-call blocks, so Claude/Kimi-id
+  Cursor turns do not execute server-resolved bash/write/delete calls a second time
+  ([#939](https://github.com/code-yeongyu/senpi/pull/939)).
+- GPT-5.6 Sol and Sol Fast now default to a 400,000-token context window in both the direct OpenAI and
+  ChatGPT OAuth (`openai-codex`) catalogs ([#933](https://github.com/code-yeongyu/senpi/pull/933)).
+- Refreshed Vercel AI Gateway pricing for `alibaba/qwen3.8-27b` from zero-value placeholder metadata to the
+  current upstream input, output, and cache-read rates ([#933](https://github.com/code-yeongyu/senpi/pull/933)).
+
+### Removed
+
+## [2026.8.18] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- xAI Grok model metadata now exposes the documented `low`/`medium`/`high`/`xhigh` effort ladder for Grok 4.6,
+  sends the selected Chat Completions `reasoning_effort`, and restores the current Grok 4.20 reasoning and
+  non-reasoning variants with their correct fixed-thinking behavior ([#930](https://github.com/code-yeongyu/senpi/pull/930)).
+
+### Removed
+
+## [2026.8.17] - 2026-08-17
+
+### Breaking Changes
+
+### Added
+
+- `openai-codex` provider now ships `-fast` Priority-tier variants for GPT-5.6 sol/terra/luna, mirroring the existing `openai` provider pattern (`upstreamModelId` + `serviceTier: "priority"`, base cost rates). The Codex Responses adapter already supports Priority service tier and applies the cost multiplier at usage-accounting time, so catalog costs stay at base values to avoid double-counting.
 - Cursor chat and tool calling are now fully supported through the new `cursor-agent` API: one HTTP/2 Connect stream per assistant turn against `agent.v1.AgentService/Run`, streaming text/thinking/tool-call deltas, usage from token deltas, and in-band execution of Cursor's server-driven exec channel (native read/ls/grep/write/shell frames, modern `pi_*` frames, MCP-advertised tools, kv blob store, tool-catalog handshake). Bridged tool runs are synthesized into the assistant message as already-resolved tool calls with paired results, so transcripts and the agent loop stay consistent, and the model catalog is discovered per account through `GetUsableModels` after `/login cursor` (max-mode 1M-context variants included). The Cursor protobuf schema is vendored with a regeneration script; unsupported protocol surfaces (computer use, subagents, background shells, canvas, smart-mode classification, conversation search) answer with typed refusals ([#910](https://github.com/code-yeongyu/senpi/pull/910)).
 
 ### Changed
 
 ### Fixed
+
+- Cloudflare AI Gateway live tests now pin `claude-sonnet-5` instead of the retired `claude-sonnet-4-5` id, so root typecheck still passes after model-catalog hydration ([#925](https://github.com/code-yeongyu/senpi/pull/925)).
+- Cursor's server-driven exec channel now keeps pending local tools alive with write-completion-chained 3-second
+  exec heartbeats and closes every normal typed result sequence exactly once. Read, shell, MCP, and modern `pi_*`
+  tool turns no longer leave the server-side exec pending until the Run stream ends before `turnEnded`
+  ([#915](https://github.com/code-yeongyu/senpi/pull/915)).
 
 ### Removed
 

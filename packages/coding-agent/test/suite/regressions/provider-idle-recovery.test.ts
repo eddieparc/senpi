@@ -9,7 +9,10 @@ import { createHarness, type Harness } from "../harness.ts";
 
 const DEFAULT_PROVIDER_IDLE_TIMEOUT_MS = 300_000;
 const DEFAULT_STREAM_START_TIMEOUT_MS = 90_000;
-const RETRY_CONTINUATION_BOUND_MS = 30_000;
+const STREAM_RETRY_LIVENESS_CAP_MS = 30_000;
+// The continuation watchdog is reconciled against the guards the same retry was
+// granted, so it expires with the stream-start budget instead of the shorter cap.
+const RETRY_CONTINUATION_BOUND_MS = Math.max(STREAM_RETRY_LIVENESS_CAP_MS, DEFAULT_STREAM_START_TIMEOUT_MS);
 
 function createAssistantStream(): EventStream<AssistantMessageEvent, AssistantMessage> {
 	return new EventStream<AssistantMessageEvent, AssistantMessage>(
@@ -167,7 +170,7 @@ describe("provider idle recovery", () => {
 		}
 	});
 
-	it("expires a no-first-event retry at the continuation bound without shortening the provider guards", async () => {
+	it("expires a no-first-event retry at the reconciled continuation bound without shortening the provider guards", async () => {
 		vi.useFakeTimers();
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },

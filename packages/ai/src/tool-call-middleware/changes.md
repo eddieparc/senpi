@@ -2,6 +2,40 @@
 
 # Tool Call Middleware Changes
 
+## 2026-08-18 - Wire-alias tool-name resolution in invoke recovery
+
+### What changed and why
+
+- Upstream gateways disguise tool names on the wire: ccapi-cf Pascal-cases
+  `todo` to `Todo`, and CC-pool layers expose non-native tools as
+  `mcp_<hash>-<Name>` (observed live: `mcp_49f0-Todo`). Reverse mapping only
+  rewrites native `tool_use` blocks, so a leaked text invoke keeps the wire
+  alias and the recovery resolver vetoed it as an unknown tool, emitting the
+  raw XML as literal text (incident: session 01a01381, event 1214,
+  `ccapi-clb/claude-opus-5`, stop_reason `tool_use` with zero tool calls).
+- `createToolResolver` now falls back to an alias map that strips CC-SDK
+  `mcp__server__tool` prefixes, hashed `mcp_<hash>-` prefixes, and collapses
+  remaining separators/case onto the registered name's alphanumerics.
+- The fallback runs only after exact and case-insensitive matching miss, so
+  existing precedence is unchanged. Two registered tools collapsing onto the
+  same alias key resolve to neither (mirrors the insensitive-map collision
+  rule), keeping hallucinated names as literal text.
+
+## 2026-08-18 - Cursor exec marker preservation
+
+### What changed and why
+
+- Recovery stream snapshots now retain enumerable symbol-keyed metadata on native
+  content blocks. This preserves Cursor's `kCursorExecResolved` marker through
+  Claude/Kimi model recovery so the agent loop does not execute an already-resolved
+  tool call a second time (fixes #938).
+- String-keyed snapshot cloning and recovered text-tool behavior are unchanged.
+
+### Why the extension system could not handle this
+
+- The marker must survive the provider-neutral model recovery wrapper before the
+  agent loop or extensions consume the assistant stream.
+
 ## 2026-08-09 - Claude missing-angle ANTML invoke recovery
 
 ### What changed and why

@@ -1,5 +1,64 @@
 # senpi-codemode fork changes
 
+## Subprocess readiness gates cell execution (2026-08-21)
+
+### What changed
+
+- `packages/senpi-codemode/src/kernels/shared/subprocess-kernel.ts` now keeps Ruby and Julia cells queued until the active subprocess emits `ready`; only then does it write the `run` frame and arm that cell's timeout.
+- An `init-failed` frame now fails queued work immediately as a kernel startup error instead of leaving it to an unrelated cell timeout.
+
+### Why
+
+- The shared kernel previously sent `init` and immediately started the first cell's timeout without observing readiness. Under load, interpreter and prelude startup could consume the entire cell budget, time out the state-setting cell, restart into a clean process, and make the following state-read cell fail nondeterministically.
+
+### Why an extension could not handle it
+
+- Subprocess generation ownership, protocol readiness, run queue dispatch, and timeout arming are private to the shared kernel implementation; an extension cannot safely order those lifecycle transitions from outside the package.
+
+### Expected merge conflict zones
+
+- LOW in `packages/senpi-codemode/src/kernels/shared/subprocess-kernel.ts` around process startup and protocol-message dispatch.
+- LOW in the Ruby subprocess lifecycle tests that now emit the protocol readiness event explicitly.
+
+## Eval completion throughput badge (2026-08-17)
+
+### What changed
+
+- Final single-cell eval frames now append the exact initiated nested tool-call count, a two-decimal
+  calls-per-second rate, and true wall-clock elapsed time to the completed header, for example
+  `eval py done ✓ · 2 calls · 1.00 calls/s · 2s · timeout 420s`.
+- `EvalToolDetails` carries `wallDurationMs` and `toolCallCount` alongside the existing
+  kernel-reported `durationMs`; the renderer uses wall time for final elapsed and throughput while
+  preserving kernel duration for consumers that need interpreter timing.
+- A cell that initiated no tool calls renders no throughput badge at all: both the count and the
+  rate segments are dropped, so the header reads `eval py done ✓ · <1s` instead of
+  `eval py done ✓ · 0 calls · 0.00 calls/s · <1s`. Positive calls without a positive wall duration
+  render `n/a calls/s`, so the TUI never displays `Infinity` or `NaN`.
+- Partial, pending, running, error, and synthetic multi-cell frames do not show a misleading final
+  aggregate. The legacy no-cells result path renders the same final metadata when the new fields are
+  available and preserves old output when they are absent.
+
+### Why
+
+- The eval extension already measures every nested tool invocation and true end-to-end wall time,
+  but users could only see completion duration and per-call rows. Surfacing count and throughput in
+  the final header makes eval composition efficiency observable without opening an analytics view.
+- Dividing by kernel-reported duration would overstate throughput whenever host tool calls wait
+  outside interpreter timing, so the visible elapsed label and the rate denominator share the same
+  wall-clock source.
+
+### Why this cannot be expressed externally
+
+- The completed frame is owned by the eval renderer, while exact initiated-call counts and cell
+  start time are owned by the eval runtime before the generic tool result reaches any external
+  extension. An external renderer cannot reconstruct both facts reliably.
+
+### Expected merge conflict zones
+
+- MEDIUM in `src/tool/render.ts` around `cellHeader`, `renderDetailedLines`, and final result metadata.
+- LOW in `src/tool/types.ts` and `src/tool/cell-runtime.ts` around `EvalToolDetails` construction.
+- LOW in eval renderer and execution-event tests.
+
 ## Eval execution metadata event (2026-08-16)
 
 ### What changed

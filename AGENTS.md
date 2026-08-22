@@ -1,7 +1,7 @@
 # Senpi Repository Guide
 
-Generated: 2026-08-17
-Commit: `abae968e8`
+Generated: 2026-08-22
+Commit: `a5eed4453`
 Branch: `main`
 
 Metadata above records the source state used for this generation pass.
@@ -103,9 +103,18 @@ Persistent terminals -> packages/pty -> crates/senpi-pty
 - Do not hand-edit `packages/ai/src/models.generated.ts`; update `packages/ai/scripts/generate-models.ts` and regenerate.
 - Ask before removing intentional functionality. Backward compatibility is opt-in, not automatic.
 - Changing fork-specific source behavior means reading the nearest `changes.md` first and updating it in the same verified increment, not in a follow-up.
-- Each entry records what changed, why, why an extension couldn't do it, and the expected merge-conflict zones. Merges resolve these files to `ours`, so a stale entry misleads the next upstream sync.
+- Merges resolve tracker files to `ours`, so a stale entry misleads the next upstream sync.
 - Changelog edits are release/audit work only. Follow `.github/agent/commands/cl.md` and never edit released sections.
-- PRs must satisfy the changelog gate (`.github/workflows/changelog-gate.yml`, `scripts/check-pr-changelog.mjs`).
+- PRs must satisfy the changelog gate (`.github/workflows/changelog-gate.yml`) for both CHANGELOG.md and changes.md — see CHANGES.MD TRACKER POLICY.
+
+## CHANGES.MD TRACKER POLICY
+
+- Upstream ownership is pinned by `.github/upstream.json` (`badlogic/pi-mono` tag + sha). A production path present in that pinned tree is upstream-owned; a path absent from it (and not an upstream rename destination) is fork-only and exempt from coverage.
+- Production scope is every changed path except: `changes.md` trackers and `.github/upstream.json` themselves; lockfiles (`package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `Cargo.lock`, `*.lock`, `*.lock.json`); non-production metadata (`.gitignore`, `LICENSE`, `test.sh`); test, fixture, example, and doc trees (`__tests__`, `tests`, `fixtures`, `examples`, `docs`) plus `*.test.*`/`*.spec.*` files; `.md`/`.mdx` docs; and generated catalog-style sources matching `*.generated.ts` / `*.generated.mts` / `*.generated.cts` / `*.generated.js` (including `packages/ai/src/models.generated.ts` and `packages/ai/src/image-models.generated.ts`).
+- Every upstream-owned production path must be covered in its exact nearest ancestor `changes.md` — never a farther tracker — by an entry that mentions that exact repo-relative path and carries all four canonical headings: `What changed`, `Why`, `Why an extension could not handle it`, `Expected merge conflict zones`.
+- Tracker coverage is independent of the release changelog: the `no-changelog` label waives only the CHANGELOG.md entry, never changes.md, and complete coverage never substitutes for a required CHANGELOG.md entry.
+- A pin-sync PR — one that edits `.github/upstream.json` — exempts upstream-owned paths that exactly match the new pinned tree, but paths still divergent from the new pin are integration repairs and must gain coverage from tracker entries in the same PR.
+- Enforcement: `scripts/check-pr-changelog.mjs` gates every PR through `.github/workflows/changelog-gate.yml` (counting only tracker entries the PR itself touches), and `scripts/audit-changes-md.mjs` audits the whole tree against the pin (`--format json|markdown`).
 
 ## QUALITY GATES
 

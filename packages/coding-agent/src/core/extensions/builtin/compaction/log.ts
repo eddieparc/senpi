@@ -32,6 +32,7 @@ const EVENTS = new Set([
 	"core_route_generated",
 	"skip_cap",
 	"skip_breaker",
+	"skip_cursor_mid_turn",
 	"threshold_trigger",
 	"hard_limit_trigger",
 	"emergency_prune",
@@ -51,6 +52,7 @@ export type CompactionLoggerEvent =
 	| "core_route_generated"
 	| "skip_cap"
 	| "skip_breaker"
+	| "skip_cursor_mid_turn"
 	| "threshold_trigger"
 	| "hard_limit_trigger"
 	| "emergency_prune"

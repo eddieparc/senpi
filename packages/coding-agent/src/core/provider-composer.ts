@@ -88,6 +88,14 @@ export interface ProviderConfigInput {
 		compat?: Model<Api>["compat"];
 	}>;
 	refreshModels?(context: RefreshModelsContext): Promise<NonNullable<ProviderConfigInput["models"]>>;
+	/**
+	 * Deterministic usability gate for implicit fallback expansion. Return `false`
+	 * while this lane is guaranteed to refuse unattended execution (for example an
+	 * unacknowledged approval gate); the provider stays registered and explicitly
+	 * selectable, but bare-family fallback expansion skips it. Re-evaluated on
+	 * every expansion, so a settings change takes effect without re-registration.
+	 */
+	fallbackEligible?(): boolean;
 }
 
 export type AuthStatus = {

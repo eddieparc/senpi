@@ -1,4 +1,5 @@
 import type {
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -7,7 +8,11 @@ import type {
 	ThinkingBudgets,
 	Transport,
 } from "@earendil-works/pi-ai";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import {
+	buildProviderContext as buildProviderContextFromAgentContext,
+	runAgentLoop,
+	runAgentLoopContinue,
+} from "./agent-loop.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AfterToolCallContext,
@@ -305,6 +310,15 @@ export class Agent {
 		return this._state;
 	}
 
+	/** Build a provider context through the same transform and conversion pipeline used by agent requests. */
+	async buildProviderContext(context: AgentContext, signal?: AbortSignal): Promise<Context> {
+		return buildProviderContextFromAgentContext(
+			context,
+			{ convertToLlm: this.convertToLlm, transformContext: this.transformContext },
+			signal,
+		);
+	}
+
 	/** Controls how queued steering messages are drained. */
 	set steeringMode(mode: QueueMode) {
 		this.steeringQueue.mode = mode;
@@ -568,6 +582,7 @@ export class Agent {
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			thinkingSelection: this._state.thinkingSelection,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
@@ -786,9 +801,12 @@ export class Agent {
 	 * provider stream, outside the loop's executor, so their
 	 * `tool_execution_start`/`tool_execution_end` lifecycle must be injected
 	 * here or the live tool card for a synthesized call never resolves.
-	 * Only valid during an active run (bridge executions always are).
+	 * A bridge execution may settle after an aborted run has already ended; its
+	 * late lifecycle event belongs to that finished run and must be discarded.
 	 */
-	async emitExternalEvent(event: AgentEvent): Promise<void> {
+	async emitExternalEvent(event: AgentEvent, runSignal?: AbortSignal): Promise<void> {
+		const activeSignal = this.activeRun?.abortController.signal;
+		if (!activeSignal || (runSignal && runSignal !== activeSignal)) return;
 		await this.processEvents(event);
 	}
 }

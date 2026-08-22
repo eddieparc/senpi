@@ -13,6 +13,7 @@ import {
 	enabledLanguagesFrom,
 	type SessionRuntime,
 } from "./extension/runtime-factory.ts";
+import { jsRuntimeInfo, jsRuntimeLabel } from "./extension/runtime-info.ts";
 import type { CodemodeSessionManager, CreateCodemodeSessionManagerOptions } from "./extension/session-manager.ts";
 import { SessionManagerProxy } from "./extension/session-manager-proxy.ts";
 import { WAKE_SOURCE_STATE_EVENT, type WakeSourceState } from "./extension/wake-source-state.ts";
@@ -119,6 +120,7 @@ export default function senpiCodemode(pi: CodemodeExtensionAPI, options: SenpiCo
 				spawns: runtime.spawns,
 				spawnDefaultAgent: runtime.settings.taskTools.task,
 				hostLine: hostLine(),
+				runtimes: runtime.runtimes,
 				...(modelId === undefined ? {} : { modelId }),
 			}),
 		);
@@ -152,6 +154,7 @@ export default function senpiCodemode(pi: CodemodeExtensionAPI, options: SenpiCo
 			executionTracker: manager,
 			renderers,
 			hostLine: hostLine(),
+			runtimes: { js: jsRuntimeInfo() },
 		}),
 	);
 	pi.registerRemovedToolHint(
@@ -206,7 +209,7 @@ export default function senpiCodemode(pi: CodemodeExtensionAPI, options: SenpiCo
 
 function hostLine(): string {
 	const cpu = os.cpus()[0]?.model?.trim();
-	return [`${os.platform()} ${os.arch()}`, cpu, `${os.availableParallelism()} cores`]
+	return [`${os.platform()} ${os.arch()}`, cpu, `${os.availableParallelism()} cores`, jsRuntimeLabel()]
 		.filter((part): part is string => !!part)
 		.join(" \u00b7 ");
 }

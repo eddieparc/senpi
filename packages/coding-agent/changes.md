@@ -1,5 +1,54 @@
 # Local fork changes
 
+## Coding-agent dependency refresh and generated install-lock update (2026-08-20)
+
+### What changed
+
+- `packages/coding-agent/package.json`: `@anthropic-ai/claude-agent-sdk` 0.3.220 -> 0.3.238, `@aws-sdk/client-bedrock-runtime` 3.1112.0 -> 3.1115.0, `@smithy/node-http-handler` 4.11.2 -> 4.11.3, `grok-mermaid` 0.2.2 -> 0.2.3, `highlight.js` 11.11.1 -> 11.12.0, `marked` 18.0.7 -> 18.0.10, `minimatch` 10.2.5 -> 10.2.6, `undici` 8.9.0 -> 8.10.0, `ws` 8.21.1 -> 8.21.3, `typebox` 1.3.8 -> 1.3.16, and `jsdom` 29.1.1 -> 30.0.1 with `@types/jsdom` 28.0.3 -> 30.0.0; the overrides block follows the root on `@hono/node-server` 2.1.1 and `rimraf` 6.1.3. Removed the unused `@mistralai/mistralai` dependency and the unused `@types/ms` devDependency. `@anthropic-ai/sdk` stays at 0.91.1, and `openai` stays at 6.26.0 and `signal-exit` at 3.0.7 as deliberate pins.
+- `packages/coding-agent/install-lock/package.json` and `packages/coding-agent/install-lock/package-lock.json`: regenerated from the refreshed root lock.
+- `packages/coding-agent/publish-deps.lock.json`: regenerated shrinkwrap for the same tree.
+- `packages/coding-agent/test/mermaid.test.ts`: the two tests covering the partial-render warning path now use input that still warns under grok-mermaid 0.2.3, which learned to render the `:::className` node syntax the old fixtures relied on failing.
+- `packages/coding-agent/test/suite/claude-sdk-oauth-naming.test.ts`: asserts the upstream package name without pinning its version, since the naming boundary is the subject of the test.
+
+### Why
+
+- jsdom 30 ships no bundled types, so `@types/jsdom` stays and moves in lockstep; the bun-compile asset patch in `scripts/prepare-bun-compile-assets.mjs` still matches both jsdom internals it rewrites, and the `build:binary` `xhr-sync-worker.js` entry still resolves. `@mistralai/mistralai` and `@types/ms` had zero source references here, and the remaining import-less dependencies stay declared because pi-ai and pi-tui are bundled into this package and their runtime dependencies must resolve from it. The two test edits track real upstream behavior changes rather than relaxing an assertion: both still exercise the same production branches.
+
+### Why an extension could not handle it
+
+- The dependency set, the generated install-lock, and the published shrinkwrap are resolved by npm and by repository tooling before the extension runtime loads, and the bundled-dependency contract is a packaging property of this package.
+
+### Expected merge conflict zones
+
+- HIGH: the `dependencies` block in `packages/coding-agent/package.json` and the two generated lock artifacts, which upstream regenerates on every release.
+- LOW: the two test fixtures, which only move when the corresponding upstream package changes behavior.
+
+## Repository-wide changes.md audit backfill for package manifests and configs (2026-08-17)
+
+### What changed
+
+- Backfill from the repository-wide changes.md audit (pin 914cf147, tag v0.84.2): records the package-root manifest and config deltas. Runtime deltas under `src/` are tracked by their nearest nested changes.md files, and the TypeScript toolchain migration rationale is in the 2026-08-02 entry.
+- `packages/coding-agent/package.json`: fork identity - renamed to `@code-yeongyu/senpi` with `private: true`, CalVer versioning, `piConfig` name `senpi` with config dir `.senpi`, the `senpi` bin, the fork repository URL, and Node `>=24`. Build scripts run `tsc` (TypeScript 7.0.2) and emit `dist/senpi`; `build:binary` builds the `../pty` workspace first, runs `prepare-bun-compile-assets.mjs`, and compiles with Bun `--compile-autoload-package-json --minify --keep-names` plus the embedded jsdom worker. Asset staging copies css-tree, mdn-data, and source-map-js into `dist/node_modules`, stages the codemode sidecar, TUI native prebuilds, PTY natives, and the imagegen skill, and adds the `qa:app-server` runner. Dependencies are the exact-pinned fork runtime set (Claude/Anthropic/Bedrock/Mistral/OpenAI SDKs, MCP, jsdom, marked, turndown, readability, proxy agents, OpenTelemetry, zod, and more) plus the five-workspace `bundledDependencies` list, the `@hono/node-server` override, and `npm-shrinkwrap.json` removed from `files`.
+- `packages/coding-agent/install-lock/package.json`: renamed to `@code-yeongyu/senpi-install`, versioned in CalVer, depends on the matching `@code-yeongyu/senpi` version, adds the `@hono/node-server` override, and requires Node `>=24`.
+- `packages/coding-agent/tsconfig.build.json`: added `@earendil-works/pi-pty` and `pi-pty/*` path mappings to the PTY workspace's `dist` declarations, and excluded `src/modes/app-server/protocol/generated/**` so the vendored Codex protocol types stay out of the build program and dist output.
+- `packages/coding-agent/tsconfig.examples.json`: examples resolve the SDK through the fork identity - the `@earendil-works/pi-coding-agent` and `/hooks` aliases were replaced by `@code-yeongyu/senpi` pointing at `./src/index.ts`.
+- `packages/coding-agent/vitest.config.ts`: a global `./test/setup.ts` setup file quarantines `SENPI_CODING_AGENT_DIR` (and clears `PI_RULES_*` variables) so suites never write faux-provider session JSONLs into the developer's real agent directory; when `CI` or `GITHUB_ACTIONS` is set, the forks pool is capped at two workers with a 20-second teardown so subprocess-heavy MCP, PTY, and app-server suites do not oversubscribe 4-vCPU runners or hang pool shutdown (measured 1364s single-fork, dominated by per-file import cost); resolve aliases map `@earendil-works/pi-ai/node/provider-scope` and `@earendil-works/pi-pty` to the sibling workspace sources.
+
+### Why
+
+- These are the package-root halves of fork changes whose runtime halves are recorded under `src/`. Without this record, a naive upstream merge would restore the upstream package identity, `tsgo` scripts, caret-pinned upstream workspace ranges, an untyped CI vitest pool, and example aliases that no longer resolve.
+- The vitest setup and pool cap encode two measured failures: leaked session writes permanently polluting real transcript directories, and unreaped subprocess children hanging the whole test step on constrained runners.
+
+### Why an extension could not handle it
+
+- Package manifests, TypeScript project configurations, and the Vitest harness are build and test infrastructure loaded before the coding-agent runtime or any extension exists.
+
+### Expected merge conflict zones
+
+- HIGH: `packages/coding-agent/package.json` scripts, dependencies, and bundling whenever upstream re-versions or reshapes packaging.
+- MEDIUM: `packages/coding-agent/vitest.config.ts` pool, setup, and alias sections, and `packages/coding-agent/tsconfig.build.json` path and exclude lists.
+- LOW: `packages/coding-agent/tsconfig.examples.json` alias map and `packages/coding-agent/install-lock/package.json` identity and engines lines.
+
 ## 2026-08-17 — Dollar invocation and RPC contract regression suites ([PR #909](https://github.com/code-yeongyu/senpi/pull/909))
 
 ### What changed

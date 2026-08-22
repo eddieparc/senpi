@@ -1,4 +1,10 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai/compat";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+	type Message,
+} from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -172,6 +178,54 @@ describe("Agent", () => {
 		expect(agent.state.thinkingLevel).toBe("low");
 	});
 
+	it("builds provider context through configured transforms", async () => {
+		const sourceMessages: AgentMessage[] = [
+			{ role: "user", content: "discard", timestamp: 1 },
+			{ role: "user", content: "keep", timestamp: 2 },
+		];
+		const transformedMessages: AgentMessage[] = [sourceMessages[1]];
+		const callOrder: string[] = [];
+		const abortController = new AbortController();
+		let transformInput: AgentMessage[] | undefined;
+		let convertInput: AgentMessage[] | undefined;
+		const agent = new Agent({
+			streamFn: unusedStreamFunction,
+			transformContext: async (messages, signal) => {
+				callOrder.push("transform");
+				transformInput = messages;
+				expect(signal).toBe(abortController.signal);
+				return transformedMessages;
+			},
+			convertToLlm: async (messages) => {
+				callOrder.push("convert");
+				convertInput = messages;
+				return messages.filter(
+					(message): message is Message =>
+						message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+				);
+			},
+		});
+		const tools: AgentTool[] = [];
+
+		const context = await agent.buildProviderContext(
+			{
+				systemPrompt: "System prompt",
+				messages: sourceMessages,
+				tools,
+			},
+			abortController.signal,
+		);
+
+		expect(callOrder).toEqual(["transform", "convert"]);
+		expect(transformInput).toBe(sourceMessages);
+		expect(convertInput).toBe(transformedMessages);
+		expect(context).toEqual({
+			systemPrompt: "System prompt",
+			messages: transformedMessages,
+			tools,
+		});
+	});
+
 	it("should subscribe to events", () => {
 		const agent = new Agent({ streamFn: unusedStreamFunction });
 
@@ -261,6 +315,121 @@ describe("Agent", () => {
 		expect(listenerFinished).toBe(true);
 		expect(promptResolved).toBe(true);
 		expect(agent.state.isStreaming).toBe(false);
+	});
+
+	it("absorbs external lifecycle events after the run ends", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+		});
+		const listener = vi.fn();
+		agent.subscribe(listener);
+
+		await agent.prompt("hello");
+		listener.mockClear();
+
+		await expect(
+			agent.emitExternalEvent({
+				type: "tool_execution_end",
+				toolCallId: "late-bridge-call",
+				toolName: "bash",
+				result: { content: [{ type: "text", text: "late" }], details: {} },
+				isError: false,
+			}),
+		).resolves.toBeUndefined();
+
+		expect(listener).not.toHaveBeenCalled();
+		expect(agent.state.pendingToolCalls).toEqual(new Set());
+	});
+
+	it("propagates external event listener failures during an active run", async () => {
+		const streamStarted = createDeferred();
+		const stream = new MockAssistantStream();
+		const agent = new Agent({
+			streamFn: () => {
+				streamStarted.resolve();
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "tool_execution_start") throw new Error("listener failed");
+		});
+
+		const prompt = agent.prompt("hello");
+		await streamStarted.promise;
+
+		await expect(
+			agent.emitExternalEvent({
+				type: "tool_execution_start",
+				toolCallId: "active-bridge-call",
+				toolName: "bash",
+				args: {},
+			}),
+		).rejects.toThrow("listener failed");
+
+		const message = createAssistantMessage("ok");
+		stream.push({ type: "done", reason: "stop", message });
+		await prompt;
+	});
+
+	it("drops external events owned by a finished run while a new run is active", async () => {
+		const runAStarted = createDeferred();
+		const runBStarted = createDeferred();
+		const runAStream = new MockAssistantStream();
+		const runBStream = new MockAssistantStream();
+		let streamIndex = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				if (streamIndex++ === 0) {
+					runAStarted.resolve();
+					return runAStream;
+				}
+				runBStarted.resolve();
+				return runBStream;
+			},
+		});
+		const externalEvents: AgentEvent[] = [];
+		agent.subscribe((event) => {
+			if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+				externalEvents.push(event);
+			}
+		});
+
+		const runA = agent.prompt("run A");
+		await runAStarted.promise;
+		const runASignal = agent.signal;
+		await agent.emitExternalEvent({
+			type: "tool_execution_start",
+			toolCallId: "run-a-call",
+			toolName: "bash",
+			args: {},
+		});
+		runAStream.push({ type: "done", reason: "stop", message: createAssistantMessage("run A done") });
+		await runA;
+
+		const runB = agent.prompt("run B");
+		await runBStarted.promise;
+		externalEvents.length = 0;
+
+		await Reflect.apply(agent.emitExternalEvent, agent, [
+			{
+				type: "tool_execution_end",
+				toolCallId: "run-a-call",
+				toolName: "bash",
+				result: { content: [{ type: "text", text: "late" }], details: {} },
+				isError: false,
+			},
+			runASignal,
+		]);
+
+		expect(externalEvents).toEqual([]);
+		runBStream.push({ type: "done", reason: "stop", message: createAssistantMessage("run B done") });
+		await runB;
 	});
 
 	it("waitForIdle should wait for async subscribers", async () => {

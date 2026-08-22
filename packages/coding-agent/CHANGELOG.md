@@ -2,16 +2,405 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+### Fixed
+
+- Fixed a session-liveness wait that could pin a CPU core at 100% by resampling settled promises in a tight microtask loop; it now yields a real event-loop turn when a queued work item does not converge, restoring RPC responsiveness under load ([#1084](https://github.com/code-yeongyu/senpi/pull/1084)).
+- The interactive TUI now keeps the working dock painted across adjacent and locally buffered turns, and clears it on the new core `agent_idle` event - emitted only after settlement-deferred turns (TTSR, loop-guard, goal recovery) resolve without starting a run - so the editor/footer no longer bounce at queued-turn boundaries. A buffered prompt consumed with `action: "handled"` (for example a `UserPromptSubmit` hook block) also clears the retained dock, prompt admission failure clears it, and clear-on-shrink reserves the dock's measured height, together eliminating the vertical jitter.
+
+- Goal cache-warm notices now render the expected wake time in the user's local system timezone with a short zone label (for example `ready 2026-08-22 16:51 GMT+9 (4m 30s)`), falling back to the legacy UTC shape when local timezone formatting is unavailable ([#1074](https://github.com/code-yeongyu/senpi/pull/1074)).
+
 ### Added
 
+- A CLI installed with `bun install -g` now runs on the Bun runtime automatically: the entry point detects that its own script lives in Bun's global install tree and re-execs itself through the installed `bun` binary instead of staying on the Node runtime its shebang picked. Set `SENPI_RUNTIME=node` to force Node or `SENPI_RUNTIME=bun` to request Bun for any install; debugger sessions (`--inspect`) and runs that are already on Bun keep their current runtime, and a missing `bun` binary silently keeps the CLI on Node.
+
+### Changed
+
+- Automatic startup selection for the built-in OpenAI and Codex providers now defaults to GPT-5.6 Sol instead of GPT-5.5. Explicitly saved GPT-5.5 selections remain supported.
+
+### Removed
+
+## [2026.8.22] - 2026-08-22
+
+### Breaking Changes
+
+### Fixed
+
+- The `permission-system` builtin extension now handles rejection during `session_shutdown` without causing an unhandled promise rejection / `uncaughtException` when permission prompts are pending.
+
+### Added
+
+### Changed
+
+### Removed
+
+## [2026.8.21-3] - 2026-08-21
+
+### Breaking Changes
+
+### Fixed
+
+- Agentic turns no longer shake the transcript up and down: assistant text painted between tool cards keeps its position instead of teleporting above the cards whenever the next tool call arrives. The streaming message component now owns only the content through the first tool call, and each text segment after it renders in a persistent component at its chronological position (#1064).
+
+- Prompts submitted while the agent is streaming (steer/follow-up) render as the queued waiting state (`Steering:`/`Follow-up:` pending display) again instead of appearing as already-sent user messages; the optimistic submit echo now applies only to prompts that actually start immediately. Messages queued during compaction likewise no longer paint a sent-looking bubble.
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.21-2] - 2026-08-21
+
+### Breaking Changes
+
+### Fixed
+
+- Contended auth-storage lock retries now sleep via `Atomics.wait` instead of busy-waiting, matching the settings-lock fix (#1056). The auth store kept the original spin loop, so under multi-session OAuth-refresh contention a synchronous auth write could burn a CPU core on the main thread.
+- Selecting a model now releases the selector and repaints immediately instead of after the provider auth check resolves. The overlay is disposed on Enter, so waiting for that round trip (a network call for subscription-OAuth providers such as Cursor) left the TUI showing a frozen frame on the previous model.
+- Cursor agent turns now finish promptly when `turnEnded` arrives even if the server leaves HTTP/2 open, while silent pre-completion streams fail after a heartbeat-aware health bound instead of freezing until the generic five-minute idle timeout.
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.8.21] - 2026-08-21
+
+### Breaking Changes
+
+### Fixed
+
+- Interactive submissions now render a local pending user echo immediately, reconcile it with the canonical `message_start`, and remove it for rejected or extension-handled input without writing render-only state to session history.
+- The `claude-sdk-oauth` lane now surfaces Claude policy refusals (for example cybersecurity refusals) as an immediate, user-visible error naming the refusal category and explanation, instead of hanging until the ~90s stream watchdog timeout. Refusals are classified as non-retryable, so they no longer enter the timeout-retry ladder or account failover ([#1052](https://github.com/code-yeongyu/senpi/pull/1052)).
+- Contended settings-lock retries now sleep via `Atomics.wait` instead of busy-waiting, retry-fallback canonicalization is memoized per error burst, and `cursor-cli-oauth`/`claude-sdk-oauth` settings loads are cached by mtime+size. Together these eliminate the settings-lock CPU-spin that froze the TUI at ~100% CPU under provider-error storms ([#1056](https://github.com/code-yeongyu/senpi/pull/1056)).
+
+### Added
+
+### Changed
+
+- Settings reads no longer acquire the settings lock: writes publish atomically via a same-directory temp file plus rename, so read-only settings loads skip lock acquisition entirely and can never observe a torn write. Concurrent writers still serialize on the lock and re-merge against the winner's content.
+
+- Refreshed dependency pins, including `@anthropic-ai/claude-agent-sdk` 0.3.238, `jsdom` 30, `undici` 8.10.0, `marked` 18.0.10, `highlight.js` 11.12.0, `grok-mermaid` 0.2.3, `minimatch` 10.2.6, `ws` 8.21.3, and `typebox` 1.3.16, and removed the unused `@mistralai/mistralai` and `@types/ms` entries.
+
+- The `monitor` tool's description, schema text, prompt guidance, and terminal docs now state the verified contract (PTY output with stderr merged, event-only filtering, dedup and pause semantics) and include worked recipes plus an anti-pattern reference.
+
+### Fixed
+
+### Removed
+
+## [2026.8.20-2] - 2026-08-20
+
+### Breaking Changes
+
+### Fixed
+
+### Added
+
+### Changed
+
+- The compiled `senpi` binary is now built with Bun 1.4.0 stable (previously 1.3.14), and npm publishing runs on Bun 1.4 stable instead of the canary channel. Dependency pins refreshed: Biome 2.5.9, `@types/node` 26.2.0, `@vitest/coverage-v8` 4.1.11, AWS Bedrock/Smithy client patches, `@bufbuild/protobuf` 2.14.0, `@types/semver` 7.8.0.
+
+### Fixed
+
+### Removed
+
+## [2026.8.20] - 2026-08-20
+
+### Breaking Changes
+
+### Fixed
+
+- `/resume` now reuses exact, byte-bounded streaming session summaries for unchanged files and paints the visible transcript tail before progressively warming older messages, avoiding repeat parse/render stalls without weakening picker metadata or full-text search.
+- Assistant text that arrives after the last tool call now renders below the tool cards instead of updating the blob above the stack, so approval questions stay visible ([#993](https://github.com/code-yeongyu/senpi/pull/993) by [@leeseunguk](https://github.com/leeseunguk)).
+- Late Cursor `tool_execution_end` events now create a TUI tool card when none is pending, so a result is not rendered without a card (#1011).
+- Session title generation now uses the session model's summarization auth instead of remapped compaction auth, so an explicit compaction model no longer produces `unauthenticated` Cursor title calls ([#982](https://github.com/code-yeongyu/senpi/pull/982) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor 0-token `resource_exhausted` retries the same model after remint/compact instead of falling back to another provider, and too-small overflow compact now drops to the last user turn ([#1015](https://github.com/code-yeongyu/senpi/pull/1015) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor native `todo`/`updateTodos` calls now persist as `senpi.todo-state` even when the server resolves them without a local `op`, so the `/todo` widget no longer stays empty after a successful native todo update ([#994](https://github.com/code-yeongyu/senpi/pull/994) by [@leeseunguk](https://github.com/leeseunguk)).
+- Native Cursor sessions no longer compact mid-turn while a Run is live: `compactBeforeNextAdmission` no-ops for `cursor` / `cursor-cli-oauth`, and blocking/generated compaction refuse those providers until the session is idle, so a mid-turn compact cannot poison `conversationId` and trigger 0-token `resource_exhausted` ([#986](https://github.com/code-yeongyu/senpi/pull/986) by [@leeseunguk](https://github.com/leeseunguk)).
+- Native Cursor `write`/`edit` via the exec bridge now emit `tool_result` after `tool_execution_end`, so plan-touch trackers see `.omo/plans/*.md` writes and momus can unblock ([#992](https://github.com/code-yeongyu/senpi/pull/992) by [@leeseunguk](https://github.com/leeseunguk)).
+- claude-sdk-oauth stream-start-timeout retries now fork the SDK conversation at the last assistant
+  boundary before the stalled turn instead of re-attaching and re-sending it, so each retry re-bills
+  only the turn's own message on a prefix cache read instead of re-writing the whole conversation
+  (fixes #723 retry-storm re-billing: cache writes grew ~8K per attempt, $25/6min, $1084/3days on
+  worker dispatch). A stalled first turn with no boundary to fork at re-seeds byte-identically, which
+  the provider serves from prefix cache after the first write. The retry watchdog cap semantics
+  (`streamRetryTimeoutMs` caps the retry continuation, reconciled to the granted stream-start guard)
+  are now documented on the setting itself.
+- The Cursor exec bridge fails closed when a session bridge has no captured owning run, and rechecks
+  run ownership after awaited preflight work so a run that ends during an approval prompt cannot start
+  a tool side effect afterward ([#1002](https://github.com/code-yeongyu/senpi/pull/1002) by [@HeiTuz](https://github.com/HeiTuz)).
+- Retry waits no longer animate decorative spinner frames at the default 80 ms cadence for sessions with at least 1,000 persisted entries, while the one-second countdown and small-session animation remain intact.
+- Hot reload no longer stalls on filesystem watcher teardown: recursive config watchers now run in a worker thread on macOS as well as Linux, and the watch engine tears down its subscriptions off the reload critical path (measured 1.5-62s of `session_shutdown` stall eliminated). MCP server reconnect during a hot reload no longer blocks the reload either (startup behavior unchanged).
+- Settings hot-reload no longer cascades across sessions that share an agent directory when another session saves a routine preference such as `defaultModel` during a reload. The replacement watcher now compares reload-window changes with the request-time settings snapshot, so routine-only writes remain suppressed while substantive configuration edits still reload ([#1006](https://github.com/code-yeongyu/senpi/pull/1006) by [@Indosaram](https://github.com/Indosaram)).
+- Settings hot-reload now clears the reload handoff unconditionally after `requestReload()` settles, preventing a stale plaintext settings snapshot from surviving when the reload successor omits the config-reload builtin ([#1006](https://github.com/code-yeongyu/senpi/pull/1006) by [@Indosaram](https://github.com/Indosaram)).
+- Compaction no longer treats implausible Cursor billed usage as context size: when the local transcript estimate is at least 50k and billed usage is more than 8× that estimate, the threshold uses the estimate so a multi-million dashboard-cumulative cacheRead cannot force a useless compact ([#985](https://github.com/code-yeongyu/senpi/pull/985) by [@leeseunguk](https://github.com/leeseunguk)).
+- Goal continuations are no longer stripped down to the newest one on every provider request. Rewriting
+  already-sent history invalidated the provider's conversation cache prefix, so a long-running team-mode
+  session paid a full uncached re-read every turn and drove itself into 429 storms. Continuation history is
+  now append-only and bounded by normal compaction instead of per-request deletion.
+- Same-model 429 retries now floor every wait with the exponential schedule (`baseDelayMs * 2^(attempt-1)`).
+  A provider that answers each rate-limit with the same tiny `retry-after` hint can no longer pin the retry
+  cadence at a few milliseconds; longer provider hints still take precedence.
+- Goal footer tickers no longer freeze the session TUI after a session replacement or reload: `GoalWaitTicker`
+  and `GoalElapsedTicker` now retire themselves when a tick hits a retired extension context instead of
+  swallowing the error and ticking against a context that can never render again, so the "Pursuing goal"
+  elapsed label and the continuation-wait countdown stop freezing and the session keeps self-painting without
+  an input event; a later `sync()` with a live context re-arms both tickers (#1028).
+- TUI mode switches no longer freeze the session UI: the renderer swap now detaches live components instead of
+  disposing them, so tool spinners, reveal animations, and extension widget intervals keep their periodic
+  repaint across the switch and the TUI does not stall until the next input event (#1028).
+- A vetoed or failed `/reload` no longer destroys live extension footers, task widgets, and hook statuses:
+  extension UI is reset only once the reload actually proceeds, so an idle session keeps its periodic repaint
+  source after a deferred or failed reload (#1028).
+- Config hot-reload no longer registers whole directory subtrees with the OS watcher: recursive watch targets
+  now open one non-recursive subscription per in-scope directory the scan already visits (skipping
+  `node_modules`, `.git`, symlinks, and filtered paths) and reconcile subscriptions after every rescan, so an
+  extensions or skills directory containing `node_modules` no longer drives `fseventsd` to 123% CPU and
+  multi-GB RSS on macOS (#1041).
+- Native Cursor sessions with Claude-named models no longer reject parallel tool starts as invalid event order:
+  ANTML invoke recovery is skipped when `model.api === "cursor-agent"`
+  ([#1013](https://github.com/code-yeongyu/senpi/pull/1013) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor turns that end as `stop` while the assistant message still contains toolCall blocks now continue so
+  pending tools run, and a turn whose tool calls were all already resolved on the Cursor exec channel no longer
+  re-enters the agent loop for an extra provider round-trip
+  ([#1016](https://github.com/code-yeongyu/senpi/pull/1016) by [@leeseunguk](https://github.com/leeseunguk)).
+- The `cursor-cli-oauth` lane now spawns with the catalog suffix variant id for explicit thinking levels
+  (`claude-fable-5-thinking-low`, `gpt-5.5-extra-high`) instead of the bracket parameter form, matching the
+  native lane's switch away from bare capability ids that Cursor's Run RPC rejects with
+  `Connect error not_found` (#1020).
+- Cursor exec tool calls that lose their owning run during an awaited preflight (for example after an approval
+  prompt) now emit a `tool_execution_end` error event, so the TUI records the failed tool result instead of
+  leaving a dangling tool call with a start and no end
+  ([#1002](https://github.com/code-yeongyu/senpi/pull/1002) by [@HeiTuz](https://github.com/HeiTuz)).
+- A Cursor turn that goes quiet after all tools have completed now ends normally instead of hanging until the
+  stream idle timeout, both for native Cursor tool runs and buffered exec results
+  ([#999](https://github.com/code-yeongyu/senpi/pull/999) by [@leeseunguk](https://github.com/leeseunguk)).
+- Cursor conversation-id rotation now persists under the agent directory (`CODING_AGENT_DIR` or
+  `~/.senpi/agent`) instead of `$HOME/cursor-conversation-ids.json`, so a reminted wire id survives a TUI
+  restart ([#998](https://github.com/code-yeongyu/senpi/pull/998) by [@leeseunguk](https://github.com/leeseunguk)).
+- A Cursor 0-token `resource_exhausted` now surfaces on the first failure of a `stream()` call so the session
+  compacts before any conversation-id rotation, and a rotation skip at the 3-rotation cap remints a fresh wire
+  id on the next stream instead of failing every later request with a poisoned-conversation error
+  ([#998](https://github.com/code-yeongyu/senpi/pull/998) by [@leeseunguk](https://github.com/leeseunguk)).
+
+### Added
+
+- The notice-box primitives are now part of the public API: `buildNoticeBox`, `noticeMessageRenderer`,
+  `noticeEntryRenderer`, and the `NoticeSpec`/`NoticeLine`/`NoticeTone` types are exported from the package
+  entry so extensions can render transcript notices in the shared visual family instead of re-implementing it.
+
+### Changed
+
+- Every remaining divergent transcript card now renders through the shared notice box (`customMessageBg`
+  background block, bold tone title, dim body): loaded-resource conflict diagnostics, the update-available
+  and package-update notifications, the risky-main-model and high-reasoning warnings, the rules banner,
+  the prompt URL widget card, and the earendil announcement. Visible text is unchanged.
+- The CLI no longer parses and evaluates the 1.2 MB Claude Agent SDK bundle or the jsdom/Readability/turndown
+  HTML stack while starting up. Both now load on first use behind the repository's documented lazy-boundary
+  pattern — the SDK when a claude-sdk-oauth stream actually opens, the HTML converters when webfetch actually
+  converts an HTML response — which removes 680 modules from the startup import graph (14,203 → 13,523).
+  Behavior is unchanged; only the moment the two dependencies are loaded moved.
+
+- Every launch is one process lighter: `cli.ts` now loads the agent (`cli-main`) in its own process
+  instead of re-spawning Node, unless the run actually needs an isolated process. The child spawn is
+  kept byte-for-byte for the two cases that require it — an inherited Inspector option (`--inspect*`
+  in exec args or `NODE_OPTIONS`), whose debugger socket must be released and re-opened in the process
+  that runs the agent, and any custom exec arguments (for example `--max-old-space-size`), which only
+  apply at process start and so must be replayed onto a fresh process. Brand environment scrubbing is
+  unaffected: `cli-main` scrubs the variable itself, so it is scrubbed in-process before anything the
+  agent spawns can inherit it. Measured on `senpi --help`: 1.206 s -> 1.131 s (-75 ms, -6.2%).
+
+- Startup is faster after the first run: the CLI now enables Node's on-disk module compile cache
+  (`enableCompileCache()`) in both `cli.ts` and `cli-main.ts` and publishes the resolved cache directory
+  through `NODE_COMPILE_CACHE` so the spawned `cli-main` child process reuses it instead of re-compiling
+  the full engine module graph on every launch. An existing `NODE_COMPILE_CACHE` value is never overridden,
+  `NODE_DISABLE_COMPILE_CACHE=1` keeps the cache off, and runtimes without the API (the compiled binary)
+  degrade to plain compilation.
+
+### Fixed
+
+### Removed
+
+## [2026.8.19] - 2026-08-19
+
+### Breaking Changes
+
+### Fixed
+
+- Implicit fallback expansion no longer routes through provider lanes that are guaranteed to refuse:
+  a registered provider may declare itself ineligible (new `ProviderConfig.fallbackEligible`), and the
+  cursor-cli-oauth lane does so while its `--force` acknowledgement is missing or its kill switch is
+  set, as does claude-sdk-oauth under a verbatim `enabled: false`. Previously a credentialed but
+  unacknowledged cursor-cli-oauth lane ranked first in the shipped `claude-opus-5` fallback chain and
+  hard-errored on every hop. Explicit model selection and `/login` are unaffected.
+- Auto-compaction can no longer be starved by a provider that reports a small context while the
+  local transcript keeps growing (native Cursor's server-side summarized usage): the threshold
+  check now takes the larger of the provider-reported context and the local transcript estimate.
+- Four coding-agent test suites no longer depend on parallel-load timing: the footer git watcher, the MCP
+  connection state machine, the cross-process OAuth refresh race control case, and resource-loader extension
+  precedence now await the exact signal or force the interleaving they assert on. Four fixed sleeps removed.
+
+### Added
+
+- Tip rotation now covers persistent memory and mass-ulw graph orchestration (88 -> 113 tips). Sixteen
+  memory tips explain in plain English what cross-session memory is and how to use `/remember`,
+  `/search`, `/memory`, `/init`, `/people`, `/reflect`, `/dream`, `/sleeptime`, `/memfs`,
+  `/memory-repository`, `/doctor`, `/facts`, and `/recompile`; nine mass-ulw tips cover dependency
+  ordering, parallel waves, per-node worker categories, the `/dag` status view, and journaled resume.
+  Every entry is command-gated, so the tips appear only for users whose extension registers them.
+
+- `/loop`: recurring and self-paced scheduled prompts, ported from Claude Code as a fork-only builtin extension.
+  Fixed loops re-deliver a prompt or loop-file sentinel on an interval; dynamic loops pick their own next delay via
+  the new `schedule_wakeup` tool. Loops coalesce missed fires into one catch-up tick, cap at 5 active per session,
+  carry a 2000-tick budget and 7-day expiry, survive restarts (shutdown suspends, session resume re-arms), and show
+  a live countdown in the footer. `/loop stop|status|pause|resume` manage them.
+
+### Changed
+- Upstream sync (`badlogic/pi-mono` main@`59a71b23`): adopted cache-friendly compaction primitives, centralized compaction summary requests, compaction routing sessions, compaction usage notices, tool disabling during summarization, extension loading in Node SEA hosts, and nested markdown skill discovery. The fork's compaction affinity/request-identity split, queued-input recovery, and interactive rendering are unchanged.
+- Provider/model changes from `@earendil-works/pi-ai` above apply to the CLI: xAI Responses routing with Grok 4.6 default, generalized thinking-token budgets, and the refreshed model catalog.
+
+### Fixed
+
+- macOS no longer shows `"senpi_pty.darwin-arm64.node" Not Opened — Apple could not verify ... is free of malware` and the CLI no longer hangs while that dialog waits. When a shipped native PTY prebuild carries the `com.apple.quarantine` attribute (npm tarballs fetched through a browser, AirDrop, or archive extraction), the loader now detects it before `dlopen()` and reports the existing `native-unavailable` diagnostic, so terminals degrade to the pipe fallback instead of blocking the process on Gatekeeper. The attribute is never stripped — that would silently disable the user's malware protection — and non-quarantined installs keep loading the real native PTY unchanged.
+- The footer's git branch keeps updating in reftable repositories on systems where `fs.watch` cannot register (descriptor limits, unsupported filesystems): the `tables.list` polling fallback is now armed even when watcher creation fails, instead of being skipped by an early return ([#970](https://github.com/code-yeongyu/senpi/pull/970)).
+- Pasting multiple images in one turn now ships every image: the second and later pastes no longer write into an orphaned payload map, markers pasted in front of existing ones renumber to stay `[Image #1]`..`[Image #k]` in reading order (so `look_at("[Image #N]")` resolves to the exact image the user sees), undo after deleting a marker restores its image along with the marker, and submitting pasted images during compaction now reports the drop instead of silently discarding them.
+- Subagent project-trust confirmation is kept for untrusted interactive projects while trusted projects skip it, restoring the intended trust boundary after the upstream sync.
+- Post-compaction queued input flushes exactly once again after the compaction rework, and package-manager version comparison uses `semver.gt` so newer installed versions no longer trigger redundant npm update calls.
+
+### Removed
+
+## [2026.8.18-3] - 2026-08-18
+
+### Breaking Changes
+
+### Added
+
+- Pasting a clipboard image in the interactive TUI now attaches the image to the submission instead of inserting its temp file path: the composer shows an atomic `[Image #N]` marker, the bytes ride the user message as an image content part in reading order, and markers transfer between editor instances (or are stripped with their payloads dropped when the destination cannot own them).
+
+- Cursor model listings report corrected context windows (current Claude families and GPT 5.5/5.6 at 1M,
+  Grok at 500K) and the cursor-agent CLI spawn string requests the matching `context` token.
+
+- Cursor reasoning levels now drive both Cursor surfaces: the thinking-level selector, `:suffix` model
+  patterns, and favorites carry provenance into the wire request, the native protobuf lane sends per-family
+  `RequestedModel.parameters`, and the `cursor-cli-oauth` lane spawns with the matching bracket or suffix
+  model string. Cursor catalogs collapse the expanded variant ids into selectable identities with correct
+  live-catalog context windows (Kimi K3 1M, Grok 256K, GPT 272K), while legacy variant ids, stored catalogs,
+  and wildcard enabled/favorite patterns keep resolving to the new identities with their level preserved.
+
+### Changed
+
+### Fixed
+
+- goal: resume an active goal when the user sends a message after a continuation-flooded session load suppressed auto-continuation; previously the "Send a message to resume" notice parked the goal because the follow-up user message only reset the continuation streak without queueing a continuation.
+- session: `sendCustomMessage` with `triggerTurn` no longer waits on the session-work barrier while the session-start binding itself holds it, unblocking goal continuations queued from `session_start` handlers during resume.
+
+- Transient provider stream-start timeouts now spend the full configured `retry.maxRetries` budget instead of
+  ending the turn after a single attempt. The retry-continuation watchdog was bounded by
+  `retry.provider.streamRetryTimeoutMs` (30s) while the same retry was granted the configured
+  `streamStartTimeoutMs` (90s), so a slow-but-alive provider was aborted 60s before its own deadline and the
+  turn surfaced `Provider stream start timed out after 90000ms` followed by `Aborted after 1 retry attempt`.
+  The watchdog is now reconciled to the guard it grants, while still cancelling a retry that outlives it.
+- Published Senpi tarballs now retain the lockfile-recorded Babel 8 dependency closure inside the bundled codemode sidecar, preventing `@babel/parser` resolution failures during extension startup ([#923](https://github.com/code-yeongyu/senpi/issues/923)).
+- Headless Claude SDK OAuth continuation now restores a bounded SDK lineage from a private sidecar only after its
+  session marker, committed assistant, identity, and local SDK transcript all verify, so `-p -c` sends only the new
+  turn while imports, forks, provider switches, rewrites, compaction, malformed state, and drift fail closed.
+
+- Claude SDK OAuth now selects the glibc Claude Code binary before the musl variant on glibc Linux hosts and when libc detection is unavailable, while retaining musl-first selection on detected musl hosts and fallback to either installed package ([code-yeongyu/oh-my-openagent#6963](https://github.com/code-yeongyu/oh-my-openagent/issues/6963)).
+
+- Messages typed while auto-compaction is running are no longer silently dropped: input submitted during `Compacting context...` is queued and delivered after compaction settles instead of being accepted and discarded. Manual `/compact` keeps rejecting unqueueable prompts as before ([#950](https://github.com/code-yeongyu/senpi/pull/950)).
+
+- Cursor exec-bridge dispatches are now bound to the run that opened their stream, so a straggler exec frame from a run that already ended (for example after a provider rate-limit error restarts the turn on a fallback lane) is refused instead of executing a dead run's tool inside the replacement run and leaking its lifecycle events into the new transcript.
+
+### Removed
+
+## [2026.8.18-2] - 2026-08-18
+
+### Added
+
+### Fixed
+
+- Goals no longer stall after a settings hot-reload: a reload `session_start` now re-engages an active goal (re-arming the monitor backstop while wake sources are live, or queueing a continuation through the existing sessionStart admission) instead of parking it until the next user message; stopped goals still never auto-start on reload ([#936](https://github.com/code-yeongyu/senpi/pull/936)).
+- Cursor CLI OAuth is now available by default when its real prerequisites exist: with `cursor-agent` installed and no managed CLI account, a native `cursor` OAuth credential is copied automatically into one canonical `native` slot without modifying the primary credential; explicit `enabled: false` remains a hard opt-out, repeated/concurrent startup is idempotent, and `/login cursor` refreshes the CLI fallback in the same session ([#931](https://github.com/code-yeongyu/senpi/pull/931)).
+
+- Cursor exec-bridge lifecycle events now require their originating run signal and await listener delivery, preventing delayed completions from entering a replacement run or becoming detached unhandled rejections ([#935](https://github.com/code-yeongyu/senpi/pull/935)).
+- Model recovery now preserves Cursor's in-memory resolved-tool marker on native tool-call blocks, so Claude/Kimi-id
+  Cursor turns do not execute server-resolved bash/write/delete calls a second time
+  ([#939](https://github.com/code-yeongyu/senpi/pull/939)).
+- GPT-5.6 Sol and Sol Fast now default to a 400,000-token context window in both the direct OpenAI and
+  ChatGPT OAuth (`openai-codex`) catalogs ([#933](https://github.com/code-yeongyu/senpi/pull/933)).
+- Refreshed Vercel AI Gateway pricing for `alibaba/qwen3.8-27b` from zero-value placeholder metadata to the
+  current upstream input, output, and cache-read rates ([#933](https://github.com/code-yeongyu/senpi/pull/933)).
+
+### New Features
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Removed
+
+## [2026.8.18] - 2026-08-18
+
+### Added
+
+### Fixed
+
+- Extension widgets no longer change stacking order when their content updates: `setWidget` now replaces the
+  component in place, so two live widgets with independent refresh timers (for example omo-senpi's `omo-task` and
+  `omo-dag` status widgets) stay in a fixed vertical order instead of bouncing on every refresh
+  ([#929](https://github.com/code-yeongyu/senpi/pull/929)).
+
+- Cursor model catalogs now become available immediately after authentication: dynamic providers perform their scoped network refresh after login, while explicit Cursor CLI fallback login/import enables the lane, `/cursor-account import native` safely copies the primary OAuth credential into managed accounts, and imported accounts refresh model availability in the current session ([#928](https://github.com/code-yeongyu/senpi/pull/928)).
+
+### New Features
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Removed
+
+## [2026.8.17] - 2026-08-17
+
+### Added
+
+- Added hard escalation for ignored identical tool-call loops: after two reminders, repeated calls are blocked before hooks and permissions rerun; persistent blocked calls now show an error notice, interrupt with a system abort, and start one Goal-safe recovery turn. Repeated hard stops hold Goal continuation until real input, and Cursor server-driven exec calls await lifecycle correlation before traversing the same veto
+  ([#922](https://github.com/code-yeongyu/senpi/pull/922)).
 - Added `$`-driven skill invocation in the interactive composer plus typed, ordered RPC command/skill candidate,
   update, and accepted-invocation events for desktop clients
   ([#909](https://github.com/code-yeongyu/senpi/pull/909)).
 
 - Cursor subscription models are now fully usable: after `/login cursor` the account's model catalog is discovered automatically and Cursor chat runs over the native agent protocol with complete tool calling — Cursor's server-driven exec channel (read/bash/edit/write/grep/find/ls and MCP/extension tools) executes through the session's real tools, so approvals, sandboxing, output truncation, and tool cards behave exactly like model-issued calls ([#910](https://github.com/code-yeongyu/senpi/pull/910)).
 
+- `cursor-cli-oauth`: an optional fallback lane that runs Cursor subscription models through the locally installed `cursor-agent` CLI (`-p` stream-json). The native `cursor` provider stays the first-party, primary path; use this lane only when the native path does not work well (protocol drift, transport failures) or when Cursor's own agent-harness behavior is explicitly wanted. Tools execute inside the Cursor CLI with no senpi approval or sandboxing (one-time acknowledgement required); accounts live in isolated per-slot credential homes with session affinity and pre-output failover, model switching on resume keeps the same chat, and the model catalog degrades to a static list when the CLI is unavailable ([#921](https://github.com/code-yeongyu/senpi/pull/921)).
+
+- Added `openai-codex` `-fast` priority-tier model variants for GPT-5.6 sol/terra/luna to the catalog, mirroring the existing `openai` provider pattern ([#918](https://github.com/code-yeongyu/senpi/pull/918)).
+
 ### Fixed
 
+- Session reload no longer repeats a full model-availability scan when extensions re-register a provider that is already registered in a fresh snapshot. Startup registration batching defers that refresh until the one post-bind `refresh()`, so create-time leftover scans cannot leak into the next reload ([#926](https://github.com/code-yeongyu/senpi/pull/926)).
+
+- Cerebras no longer defaults to `zai-glm-4.7`, which the live catalog dropped. The bundled default is now `gpt-oss-120b`, which remains in both the committed snapshot and the regenerated catalog, so `npm test` after a live model-data hydrate no longer fails provider-default resolution ([#926](https://github.com/code-yeongyu/senpi/pull/926)).
+
+- Steering queued while a provider stream-start timeout retry is running now starts automatically when that managed
+  retry exhausts its budget, instead of remaining parked until another user prompt. Generic terminal provider errors
+  and user-aborted retries keep their existing queue-retention behavior
+  ([#917](https://github.com/code-yeongyu/senpi/pull/917)).
+- Cursor subscription tool turns now keep long local executions alive with per-exec heartbeats and close every
+  server-requested result lifecycle exactly once, preventing read, shell, MCP, and modern `pi_*` calls from leaving
+  the Cursor Run stream pending until it terminates before `turnEnded`
+  ([#915](https://github.com/code-yeongyu/senpi/pull/915)).
 - RPC discovery sessions no longer emit an initial `commands_changed` invalidation. Clients read the baseline through
   `get_commands`, while actual post-bind extension reloads still emit one deduplicated ordered snapshot, preventing
   command-surface refresh consumers from creating an unbounded discovery-session feedback loop
@@ -44,6 +433,7 @@
 
 ### Fixed
 
+- Custom editors no longer lose Enter submissions when pi-tui clears live editor state before invoking `onSubmit`; editors that submit before clearing still retain their non-empty expanded value ([#908](https://github.com/code-yeongyu/senpi/pull/908)).
 - Non-interactive runs (`senpi -p`) no longer die with an uncaught `EPERM: operation not permitted, mkdir <agentDir>/auth.json.lock` when the agent dir is not writable (for example a background worker under a macOS seatbelt profile that grants only the lockfile paths). The async auth read path (`readLatestData`) now degrades lock-acquisition and read failures to last-good in-memory data with a recorded diagnostic warning, mirroring the settings-manager path that already behaved this way; OAuth write/refresh persistence remains fail-closed. proper-lockfile staleness is also unified across `FileAuthStorageBackend` (sync and async) and `FileSettingsStorage` on one shared policy (`realpath: false, stale: 30s, update: 10s` in `core/lockfile-policy.ts`), so a synchronous contender can no longer classify a still-live asynchronous lock as stale mid-update and steal it ([#898](https://github.com/code-yeongyu/senpi/pull/898)).
 
 - Ambient Claude SDK OAuth authentication now preserves request-scoped token overrides and explicit empty masks through stored and ambient auth replay, treats request token slots as a complete namespace so sibling host accounts cannot survive a mask, isolates request tokens from subprocess-control variables, keeps request tokens out of persistent `config-dir` credentials, remains valid across resident and auxiliary calls, recognizes request tokens in explicit ambient mode, and shares bounded availability probes without abandoned-request ownership ([#836](https://github.com/code-yeongyu/senpi/pull/836) by [@ismetanin](https://github.com/ismetanin)).
