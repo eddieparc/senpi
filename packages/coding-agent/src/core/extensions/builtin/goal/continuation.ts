@@ -58,23 +58,7 @@ export type GoalContinuationVerdict =
 				| "context-overflow";
 	  };
 
-export function shouldQueueGoalContinuationWhenIdle(
-	goal: Goal | null,
-	isIdle: boolean,
-	hasPendingMessages: boolean,
-): goal is Goal {
-	return goal?.status === "active" && isIdle && !hasPendingMessages;
-}
-
-export function shouldQueueGoalContinuationAfterAgentEnd(
-	goal: Goal | null,
-	hasPendingMessages: boolean,
-	messages: readonly AgentMessage[],
-): goal is Goal {
-	return goal?.status === "active" && !hasPendingMessages && didAgentEndCleanly(messages);
-}
-
-function didAgentEndCleanly(messages: readonly AgentMessage[]): boolean {
+export function didAgentEndCleanly(messages: readonly AgentMessage[]): boolean {
 	const lastAssistantIndex = findLastAssistantMessageIndex(messages);
 	if (lastAssistantIndex === undefined) return false;
 
@@ -197,6 +181,7 @@ export function continuationTurnUsedTools(messages: readonly AgentMessage[]): bo
 
 function isEligibleForGoalContinuation(input: GoalContinuationInput): boolean {
 	if (input.goal?.status !== "active" || input.hasPendingMessages) return false;
+	if (input.path === "sessionStart" && input.goal.continuationStoppedAt !== undefined) return false;
 	if (input.path === "systemRecovery" || input.path === "providerRecovery") return true;
 	if (input.path === "immediate") {
 		return (

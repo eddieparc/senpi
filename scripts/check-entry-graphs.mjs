@@ -32,12 +32,19 @@ const WORKSPACE = {
  */
 const BUDGETS = {
 	"packages/ai": {
+		"./models": {
+			// Fork: models.ts also carries credential-pool slots, models-store and catalog max lookup (21 files at the v1.0.0 sync).
+			// +1 (senpi#2893): utils/oauth-refresh-error.ts, the typed transient/permanent refresh classification auth/resolve.ts raises.
+			maxFiles: 22,
+			forbid: ["providers/", "models.generated.ts", "index.ts", "utils/validation.ts", "utils/typebox-helpers.ts"],
+		},
 		"./utils/*": { maxFiles: 3, forbid: ["providers/", "api/", "index.ts"] },
 	},
 	"packages/agent": {
 		"./harness/runtime/reducer": { maxFiles: 1 },
 		"./harness/context": { maxFiles: 6, forbid: ["harness/runtime/", "harness/execution/", "packages/ai/"] },
-		"./harness/env/nodejs": { maxFiles: 5, forbid: ["packages/ai/", "harness/runtime/"] },
+		// 6: windows-process-tree.ts, the leaf that plans Windows tree kills by creation time (senpi#2999).
+		"./harness/env/nodejs": { maxFiles: 6, forbid: ["packages/ai/", "harness/runtime/"] },
 		"./harness/session": { maxFiles: 25, forbid: ["harness/runtime/", "harness/execution/", "packages/ai/src/index.ts"] },
 	},
 };
@@ -115,6 +122,7 @@ for (const [pkgDir, budgets] of Object.entries(BUDGETS)) {
 				continue;
 			}
 			const graph = [...walk(source)].map((file) => relative(ROOT, file));
+			console.log(`${pkgDir} export "${name}": ${graph.length} files (budget ${budget.maxFiles})`);
 			if (graph.length > budget.maxFiles) {
 				console.error(
 					`${pkgDir} export "${name}" reaches ${graph.length} files, budget ${budget.maxFiles}\n` +

@@ -1,5 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type Component, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	nextRenderRevision,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { type AssistantRenderDescriptor, createAssistantRenderDescriptors } from "./assistant-render-descriptors.ts";
@@ -27,8 +35,11 @@ export class AssistantMessageComponent extends Container {
 	private renderDescriptors: readonly AssistantRenderDescriptor[] = [];
 	private hasToolCalls = false;
 	private expanded = false;
+	private providerErrorOwned = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
+	/** Moves whenever the cached render is dropped; output is a function of the state `updateContent` records. */
+	private revision = nextRenderRevision();
 
 	constructor(
 		message?: AssistantMessage,
@@ -55,6 +66,7 @@ export class AssistantMessageComponent extends Container {
 
 	override invalidate(): void {
 		this.renderCache = undefined;
+		this.revision = nextRenderRevision();
 		super.invalidate();
 		this.renderDescriptors = [];
 		this.refreshContent();
@@ -79,10 +91,25 @@ export class AssistantMessageComponent extends Container {
 		this.refreshContent();
 	}
 
+	setProviderErrorOwned(owned: boolean): void {
+		if (this.providerErrorOwned === owned) return;
+		this.providerErrorOwned = owned;
+		this.refreshContent();
+	}
+
+	/** Transcript-only reasoning/empty streaming heads may sit inside a compact exploration group. */
+	get isExplorationDetail(): boolean {
+		return this.renderDescriptors.every((part) => part.kind === "spacer" || part.kind === "thinking-label");
+	}
+
 	setOutputPad(padding: number): void {
 		this.outputPad = padding;
 		this.renderDescriptors = [];
 		this.refreshContent();
+	}
+
+	override getRenderRevision(): number {
+		return this.revision;
 	}
 
 	override render(width: number): string[] {
@@ -114,10 +141,12 @@ export class AssistantMessageComponent extends Container {
 		}
 		this.lastMessageSignature = messageSignature;
 		this.renderCache = undefined;
+		this.revision = nextRenderRevision();
 		if (streamingChanged) this.renderDescriptors = [];
 		this.hasToolCalls = message.content.some((content) => content.type === "toolCall");
 		const descriptors = createAssistantRenderDescriptors(message, {
 			expanded: this.expanded,
+			providerErrorOwned: this.providerErrorOwned,
 			hiddenThinkingLabel: this.hiddenThinkingLabel,
 			hideThinkingBlock: this.hideThinkingBlock,
 			thinkingVisibilityOverrides: this.thinkingVisibilityOverrides,

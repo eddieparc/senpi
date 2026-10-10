@@ -9,6 +9,7 @@ import {
 } from "../src/api/devin-agent/gen/cascade_pb.ts";
 import { getBuiltinApiProvider } from "../src/api-registry.ts";
 import { createModels } from "../src/models.ts";
+import { DEVIN_MODELS } from "../src/providers/devin.models.ts";
 import { devinProvider } from "../src/providers/devin.ts";
 import "../src/compat.ts";
 
@@ -73,7 +74,7 @@ const CATALOG: Configs = {
 	],
 };
 
-describe.sequential("devin provider", () => {
+describe("devin provider", () => {
 	it("registers the devin-agent api in the builtin registry", () => {
 		expect(getBuiltinApiProvider("devin-agent")).toBeDefined();
 	});
@@ -84,15 +85,16 @@ describe.sequential("devin provider", () => {
 		expect(provider.auth.oauth?.loginLabel).toBe("Sign in with Devin");
 		const seeded = provider.getModels();
 		const ids = seeded.map((model) => model.id);
-		expect(ids[0]).toBe("swe-2-high");
-		expect(ids).toEqual(
-			expect.arrayContaining(["swe-2-low", "swe-2-max", "swe-2-high-lite", "swe-1-6", "swe-1-6-fast"]),
-		);
-		expect(ids).not.toContain("swe-2");
+		// Exactly the lanes Cascade serves: the bare uid and the CLI-binary-only
+		// `swe-2-low` / `swe-2-high-lite` strings are answered with permission_denied.
+		expect(ids).toEqual(["swe-2-high", "swe-2-medium", "swe-2-max", "swe-1-6", "swe-1-6-fast"]);
 		for (const model of seeded) {
 			expect(model.api).toBe("devin-agent");
 			expect(model.provider).toBe("devin");
 			expect(model.baseUrl).toBe("https://server.codeium.com");
+			// Effort is encoded in the lane uid and never forwarded to Cascade,
+			// so a Devin model must never advertise a controllable thinking level.
+			expect(model.reasoning).toBe(false);
 		}
 	});
 
@@ -142,7 +144,9 @@ describe.sequential("devin provider", () => {
 			api: "devin-agent",
 			provider: "devin",
 			baseUrl,
-			reasoning: true,
+			// The fixture advertises supportsThinking, but the generic level is
+			// never forwarded: the lane uid already encodes the effort.
+			reasoning: false,
 			input: ["text", "image"],
 			contextWindow: 262_000,
 			maxTokens: 64_000,
@@ -186,5 +190,24 @@ describe.sequential("devin provider", () => {
 			);
 		});
 		expect(await fetchDevinModels({ apiKey: "abc", baseUrl: emptyUrl })).toBeUndefined();
+	});
+
+	it("normalizes stale stored catalogs that still advertise a thinking level", async () => {
+		const seed = DEVIN_MODELS[0];
+		if (!seed) throw new Error("devin seed is empty");
+		const stale = { models: [{ ...seed, reasoning: true }] };
+
+		const provider = devinProvider();
+		await provider.refreshModels?.({
+			stored: stale,
+			allowNetwork: false,
+			signal: new AbortController().signal,
+			publish: async () => true,
+		});
+		const restored = provider.getModels().filter((model) => model.id === seed.id);
+		expect(restored.length).toBeGreaterThan(0);
+		for (const model of restored) {
+			expect(model.reasoning).toBe(false);
+		}
 	});
 });

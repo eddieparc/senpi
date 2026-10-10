@@ -1,27 +1,7 @@
+import type { QuestionRequest } from "../../types.ts";
+
+export type { QuestionRequest, QuestionResponse } from "../../types.ts";
 export { CLAUDE_PARAMS, CODEX_PARAMS } from "./params.ts";
-
-// TODO(t3-merge): re-export from ../../types.ts
-export interface QuestionRequest {
-	requestId: string;
-	questions: Array<{
-		id: string;
-		header: string;
-		question: string;
-		options: Array<{ label: string; description?: string }>;
-		multiSelect: boolean;
-	}>;
-	waitForAnswer: boolean;
-	timeoutMs: number;
-}
-
-// TODO(t3-merge): re-export from ../../types.ts
-export interface QuestionResponse {
-	status: "answered" | "comment-submitted" | "timed_out" | "cancelled" | "orphaned-after-restart" | "unavailable";
-	answers: Record<string, { selected: string[]; text?: string }>;
-	comment?: string;
-	unanswered: string[];
-	autoResolvedAfterMs?: number;
-}
 
 export type AskUserVariant = "codex" | "claude";
 export type Question = QuestionRequest["questions"][number];
@@ -131,6 +111,9 @@ function parseQuestion(variant: AskUserVariant, raw: unknown, index: number): Qu
 export function toCanonical(variant: AskUserVariant, args: unknown, options?: ToCanonicalOptions): QuestionRequest {
 	if (!isRecord(args)) throw new AskUserSchemaError(WAIT_FLAG_STEER_TEXT);
 	const waitForAnswer = readWaitFlag(variant, args);
+	if (args.required !== undefined && typeof args.required !== "boolean") {
+		throw new AskUserSchemaError("required must be a boolean when present");
+	}
 	const limits = LIMITS[variant];
 	if (!Array.isArray(args.questions) || args.questions.length < 1 || args.questions.length > limits.maxQuestions) {
 		throw new AskUserSchemaError(`questions must contain 1 to ${limits.maxQuestions} items`);
@@ -140,5 +123,6 @@ export function toCanonical(variant: AskUserVariant, args: unknown, options?: To
 		questions: args.questions.map((question, index) => parseQuestion(variant, question, index)),
 		waitForAnswer,
 		timeoutMs: options?.timeoutMs ?? DEFAULT_ASK_USER_TIMEOUT_MS,
+		...(args.required === true ? { required: true } : {}),
 	};
 }

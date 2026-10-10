@@ -12,9 +12,12 @@
 export const SESSION_ENVIRONMENT_KEYS = [
 	"PI_SESSION_ID",
 	"PI_SESSION_FILE",
+	"PI_SESSION_CWD",
+	"PI_GOAL_STORE_FILE",
 	"PI_PROVIDER",
 	"PI_MODEL",
 	"PI_REASONING_LEVEL",
+	"OMO_BROWSER_ENGINE",
 ] as const;
 
 /** Resolved per-session values for {@link SESSION_ENVIRONMENT_KEYS}; absent keys stay unset. */
@@ -22,17 +25,22 @@ export type SessionEnvironment = Readonly<Record<string, string>>;
 
 /** Structural slice of `ExtensionContext` the session environment is resolved from. */
 export interface SessionEnvironmentSource {
+	readonly cwd: string;
+	readonly goalStoreFile?: string;
 	readonly sessionManager: {
 		getSessionId(): string;
 		getSessionFile(): string | undefined;
 	};
 	readonly model?: { readonly provider: string; readonly id: string } | undefined;
 	readonly thinkingLevel?: string | undefined;
+	readonly browserEngine?: string | undefined;
 }
 
 export function sessionEnvironmentFrom(source: SessionEnvironmentSource): SessionEnvironment {
 	const env: Record<string, string> = {};
 	env.PI_SESSION_ID = source.sessionManager.getSessionId();
+	env.PI_SESSION_CWD = source.cwd;
+	if (source.goalStoreFile) env.PI_GOAL_STORE_FILE = source.goalStoreFile;
 	const sessionFile = source.sessionManager.getSessionFile();
 	if (sessionFile) env.PI_SESSION_FILE = sessionFile;
 	const model = source.model;
@@ -41,6 +49,7 @@ export function sessionEnvironmentFrom(source: SessionEnvironmentSource): Sessio
 		env.PI_MODEL = model.id;
 	}
 	if (source.thinkingLevel) env.PI_REASONING_LEVEL = source.thinkingLevel;
+	if (source.browserEngine) env.OMO_BROWSER_ENGINE = source.browserEngine;
 	return env;
 }
 

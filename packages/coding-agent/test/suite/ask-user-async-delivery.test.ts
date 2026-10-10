@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionContext, QuestionResponse } from "../../src/core/extensions/types.ts";
+import type { ExtensionContext, ExtensionToolContext, QuestionResponse } from "../../src/core/extensions/types.ts";
 import { ApprovalBridge, createAppServerUIContext } from "../../src/modes/app-server/server/approvals.ts";
 import { UserInputBridge } from "../../src/modes/app-server/server/user-input-bridge.ts";
 import type { UserInputOutboundMessage } from "../../src/modes/app-server/server/user-input-types.ts";
@@ -39,7 +39,7 @@ async function askAsync(
 		{ questions: ASYNC_QUESTIONS, waitForAnswer: false },
 		undefined,
 		undefined,
-		ctx,
+		ctx as ExtensionToolContext,
 	);
 	expect(result.details).toMatchObject({ accepted: true, status: "pending" });
 	return { settled: delivery.settled(ctx, requestId) };
@@ -102,7 +102,14 @@ describe("async ask-user delivery over the RPC bridge", () => {
 
 		expect(delivery.deliveries).toEqual([
 			{
-				content: "[Answer to question rpc-steer]\nThe user responded: use bun\nUnanswered: Library",
+				content: [
+					{
+						type: "text",
+						text: "[Answer to question rpc-steer]\nThe user responded: (see [The user's comment for question rpc-steer] below)\nUnanswered: Library",
+					},
+					{ type: "text", text: "[The user's comment for question rpc-steer]" },
+					{ type: "text", text: "use bun" },
+				],
 				options: { deliverAs: "steer" },
 			},
 		]);
@@ -153,7 +160,17 @@ describe("async ask-user delivery over the app-server bridge", () => {
 		await settled;
 
 		expect(delivery.deliveries).toEqual([
-			{ content: "[Answer to question app-answer]\nLibrary: OAuth", options: { deliverAs: "followUp" } },
+			{
+				content: [
+					{
+						type: "text",
+						text: "[Answer to question app-answer]\nLibrary: (see [The user's answer to Library for question app-answer] below)",
+					},
+					{ type: "text", text: "[The user's answer to Library for question app-answer]" },
+					{ type: "text", text: "OAuth" },
+				],
+				options: { deliverAs: "followUp" },
+			},
 		]);
 	});
 

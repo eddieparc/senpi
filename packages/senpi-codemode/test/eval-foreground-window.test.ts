@@ -8,11 +8,9 @@ import { EvalDetachedCellManager } from "../src/tool/detached-cell-manager.ts";
 import { createEvalTool } from "../src/tool/eval-tool.ts";
 import { FakeKernel, FakeManager, fakeExtensionContext } from "./eval/fakes.ts";
 
-type TextContent = Extract<AgentToolResult<unknown>["content"][number], { type: "text" }>;
-
 function textOf(resultValue: AgentToolResult<unknown>): string {
 	const texts: string[] = [];
-	for (const part of resultValue.content as readonly TextContent[]) {
+	for (const part of resultValue.content) {
 		if (part.type === "text") texts.push(part.text);
 	}
 	return texts.join("\n");
@@ -81,9 +79,9 @@ describe("eval foreground window", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		expect(settlement.settled).toBe(true);
 		const detached = await execution;
-		expect(textOf(detached)).toContain("detached and is still running");
+		expect(textOf(detached)).toContain("detached and is running in the js kernel");
 		expect(kernel.interrupts).toEqual([]);
-		expect(manager.busyFor("js")).toMatchObject({ cellId: "fw-long-cell", state: "detached" });
+		expect(manager.liveCells("js")).toMatchObject([{ cellId: "fw-long-cell", state: "detached" }]);
 		await manager.stop("fw-long-cell");
 		await manager.flushNotifications();
 	});
@@ -111,8 +109,8 @@ describe("eval foreground window", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		expect(settlement.settled).toBe(true);
 		const detached = await execution;
-		expect(textOf(detached)).toContain("detached and is still running");
-		expect(manager.busyFor("js")).toMatchObject({ cellId: "fw-short-cell", state: "detached" });
+		expect(textOf(detached)).toContain("detached and is running in the js kernel");
+		expect(manager.liveCells("js")).toMatchObject([{ cellId: "fw-short-cell", state: "detached" }]);
 		await manager.stop("fw-short-cell");
 		await manager.flushNotifications();
 	});
@@ -141,7 +139,7 @@ describe("eval foreground window", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		expect(settlement.settled).toBe(true);
 		const detached = await execution;
-		expect(textOf(detached)).toContain("detached and is still running");
+		expect(textOf(detached)).toContain("detached and is running in the js kernel");
 		await manager.stop("fw-bridge-cell");
 		await manager.flushNotifications();
 	});
@@ -197,7 +195,7 @@ describe("eval foreground window", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		expect(settlement.settled).toBe(true);
 		const detached = await execution;
-		expect(textOf(detached)).toContain("detached and is still running");
+		expect(textOf(detached)).toContain("detached and is running in the js kernel");
 		await manager.stop("fw-default-cell");
 		await manager.flushNotifications();
 	});

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AssistantImages, ImagesModel } from "@earendil-works/pi-ai/compat";
+import type { AssistantImages, ImageModel } from "@earendil-works/pi-ai/compat";
 import {
 	generateImages,
 	getImageModel,
@@ -27,7 +27,8 @@ function synthesizeModel(
 	auth: Extract<ImageGenAuthResolution, { kind: "native-openai" | "gateway" }>,
 	id: keyof typeof IMAGE_MODEL_NAMES,
 ) {
-	const model: ImagesModel<"openai-images"> = {
+	const model: ImageModel<"openai-images"> = {
+		type: "image",
 		id,
 		name: IMAGE_MODEL_NAMES[id],
 		api: "openai-images",
@@ -92,6 +93,20 @@ export const generateImageTool = defineTool<typeof Params, GenerateImageDetails>
 		"Generate or edit an image with OpenAI gpt-image-2.5 (Sunburst by default, the most capable; Flare when speed matters more than quality) and save it as a png, jpeg, or webp file, optionally with a transparent background. Pass reference_image_paths to edit or reference existing images. Generate directly when the request is clear instead of asking for confirmation. Returns the saved file paths.",
 	promptSnippet:
 		"Generate or edit images from prompts and optional reference images, saving them as png/jpeg/webp files.",
+	// Deferred: the schema costs ~1K prompt tokens on every request and the bundled imagegen skill
+	// names the tool, so a by-name call activates it on first use instead of shipping it resident.
+	exposure: "search",
+	searchGroup: "imagegen",
+	searchKeywords: [
+		"generate image",
+		"image generation",
+		"edit image",
+		"create a picture",
+		"illustration",
+		"mockup",
+		"gpt-image",
+		"transparent png",
+	],
 	parameters: Params,
 	async execute(toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
 		const size = params.size ?? "auto";

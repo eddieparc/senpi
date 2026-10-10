@@ -6,13 +6,13 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { handleAppServerCommand } from "./cli/app-server-command.ts";
-import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
+import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp, resolveSessionRuntime } from "./cli/args.ts";
 import {
 	type AuthCheckResult,
 	checkProviderAuth,
@@ -29,21 +29,45 @@ import {
 	printAuthCommandHelp,
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
+import { movedSessionToContinue } from "./cli/continue-moved.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
+import { chooseCrossProjectAction, confirmSameRepositoryRebind } from "./cli/cross-project-session.ts";
+import {
+	dispatchAppServerCommand,
+	dispatchConfigCommand,
+	dispatchHostCommand,
+	dispatchPackageCommand,
+	dispatchScheduleCommand,
+} from "./cli/deferred-commands.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
+import { resolveHelpExtensionFlags } from "./cli/help-extension-flags.ts";
+import { helpFlagsScope, isPlainHelpRequest, resolveHelpProjectTrust } from "./cli/help-fast-path.ts";
+import { writeHelpFlagsCache } from "./cli/help-flags-cache.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
-import { listTips } from "./cli/list-tips.ts";
+import { isModelsDiscoverCommand, runModelsDiscoverCommand } from "./cli/models-command.ts";
+import { exitAfterOutput, printThenExit } from "./cli/print-then-exit.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
-import { selectSession } from "./cli/session-picker.ts";
+import { prepareSessionOpening } from "./cli/session-opening.ts";
 import {
 	createStartupLoadingIndicator,
 	pauseIndicatorDuringPrompts,
 	shouldShowStartupLoadingIndicator,
 } from "./cli/startup-loading-indicator.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import { APP_NAME, DISPLAY_VERSION, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir } from "./config.ts";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
+import {
+	APP_NAME,
+	DISPLAY_VERSION,
+	ENV_SESSION_DIR,
+	expandTildePath,
+	getAgentDir,
+	getInstallPackageDir,
+} from "./config.ts";
+import {
+	applyRetryFallbackProfile,
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionRuntime,
+} from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
 	createAgentSessionFromServices,
@@ -54,8 +78,10 @@ import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
 import { envValue } from "./core/brand.ts";
 import { type CredentialAccountSummary, summarizeCredentialAccounts } from "./core/credential-accounts.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
+import { resolveMovedPath } from "./core/extensions/builtin/moved-path-guard/resolve.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
+import { installMemoryReportSignal } from "./core/memory-report/memory-report-write.ts";
 import {
 	getModelNarrowingPatterns,
 	resolveCliModel,
@@ -63,8 +89,11 @@ import {
 	type ScopedModel,
 } from "./core/model-resolver.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
+import { markMovedSessions, movedHereSessionToContinue, withMovedSessions } from "./core/moved-sessions.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { recordProcessLifetime } from "./core/process-crash-record.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
+import { resolveResumeTarget } from "./core/resume-target.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
@@ -72,22 +101,24 @@ import {
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
+import { sessionExtensionFlagValues } from "./core/session-extension-flags.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
+import { classifySessionRepository, readSessionCwd, rebindSessionFile } from "./core/session-rebind.ts";
+import { collectSettingsDiagnosticsWithContext } from "./core/settings-diagnostics.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
-import { shouldJoinSharedHost } from "./core/shared-host-policy.ts";
-import { printTimings, resetTimings, time } from "./core/timings.ts";
+import { type ClampedThinkingSelection, formatThinkingClampWarning } from "./core/thinking-levels.ts";
+import { printTimings, recordTiming, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { getFromSourceRealConfigWarning } from "./from-source-config-guard.ts";
+import { legacyPiEditStartupNotice } from "./legacy-pi-edits.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { createInteractiveHostRuntime } from "./modes/interactive/interactive-host-runtime.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { runPrintMode } from "./modes/print-mode.ts";
+import { startHostChildReaper } from "./modes/rpc/child-reaper.ts";
 import { AUTO_TITLE_SESSIONS_CAPABILITY, parseClientCapabilities } from "./modes/rpc/custom-capability.ts";
-import { findInternalSupervisorArgs, parseSupervisorArgs, runHostSupervisor } from "./modes/rpc/host-lifecycle.ts";
-import { runMultiSessionHost } from "./modes/rpc/multi-session-host.ts";
-import { runRpcMode } from "./modes/rpc/rpc-mode.ts";
-import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import type { PreparableRuntimeFactory, PrepareRuntimeOptions } from "./modes/rpc/host-warm.ts";
+import { dispatchInternalSupervisor } from "./modes/rpc/supervisor-route.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
@@ -114,16 +145,6 @@ async function readPipedStdin(): Promise<string | undefined> {
 		});
 		process.stdin.resume();
 	});
-}
-
-function collectSettingsDiagnostics(
-	settingsManager: SettingsManager,
-	context: string,
-): AgentSessionRuntimeDiagnostic[] {
-	return settingsManager.drainErrors().map(({ scope, error }) => ({
-		type: "warning",
-		message: `(${context}, ${scope} settings) ${error.message}`,
-	}));
 }
 
 function collectAuthDiagnostics(authStorage: AuthStorage, context: string): AgentSessionRuntimeDiagnostic[] {
@@ -182,20 +203,24 @@ function toProjectTrustMode(appMode: AppMode): AppMode {
 /**
  * Interactive launches auto-title by default. RPC clients can opt in through
  * `auto_title_sessions`; every other non-interactive app mode opts in with
- * `--auto-title-sessions`. Sessions resumed with existing context messages are
- * never retitled, whatever the mode, capability, or flag.
+ * `--auto-title-sessions`. A per-session `open_session.auto_title`, when present,
+ * replaces that host-wide decision for that session only. Sessions resumed with
+ * existing context messages are never retitled, whatever the mode, capability,
+ * flag, or per-session override.
  */
 export function resolveAutoTitleSessions(
 	appMode: AppMode,
 	parsed: Args,
 	hasContextMessages: boolean,
 	clientCapabilities: readonly string[] = parseClientCapabilities(envValue("RPC_CLIENT_CAPABILITIES")),
+	sessionAutoTitle?: boolean,
 ): boolean {
+	if (hasContextMessages) return false;
+	if (sessionAutoTitle !== undefined) return sessionAutoTitle;
 	return (
-		(appMode === "interactive" ||
-			parsed.autoTitleSessions === true ||
-			(appMode === "rpc" && clientCapabilities.includes(AUTO_TITLE_SESSIONS_CAPABILITY))) &&
-		!hasContextMessages
+		appMode === "interactive" ||
+		parsed.autoTitleSessions === true ||
+		(appMode === "rpc" && clientCapabilities.includes(AUTO_TITLE_SESSIONS_CAPABILITY))
 	);
 }
 
@@ -370,17 +395,24 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
  * Resolves false on stdin EOF (Ctrl+D, closed pipe): without the close handler a
  * readline question never settles once the input stream ends, hanging the process.
  */
-async function promptConfirm(message: string): Promise<boolean> {
+export async function promptConfirm(message: string): Promise<boolean> {
 	return new Promise((resolve) => {
 		const rl = createInterface({
 			input: process.stdin,
 			output: process.stdout,
 		});
+		let settled = false;
+		const settle = (result: boolean): void => {
+			if (settled) return;
+			settled = true;
+			resolve(result);
+		};
 		rl.question(`${message} [y/N] `, (answer) => {
+			const normalized = answer.trim().toLowerCase();
+			settle(normalized === "y" || normalized === "yes");
 			rl.close();
-			resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
 		});
-		rl.on("close", () => resolve(false));
+		rl.once("close", () => settle(false));
 	});
 }
 
@@ -396,6 +428,24 @@ function validateForkFlags(parsed: Args): void {
 
 	if (conflictingFlags.length > 0) {
 		console.error(chalk.red(`Error: --fork cannot be combined with ${conflictingFlags.join(", ")}`));
+		process.exit(1);
+	}
+}
+
+function validateRebindFlags(parsed: Args): void {
+	if (!parsed.rebind) return;
+
+	const conflictingFlags = [
+		parsed.session ? "--session" : undefined,
+		parsed.fork ? "--fork" : undefined,
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume ? "--resume" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+		parsed.sessionId !== undefined ? "--session-id" : undefined,
+	].filter((flag): flag is string => flag !== undefined);
+
+	if (conflictingFlags.length > 0) {
+		console.error(chalk.red(`Error: --rebind cannot be combined with ${conflictingFlags.join(", ")}`));
 		process.exit(1);
 	}
 }
@@ -443,6 +493,26 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string,
 	}
 }
 
+async function rebindSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): Promise<SessionManager> {
+	try {
+		const reboundPath = await rebindSessionFile(sourcePath, cwd, sessionDir);
+		console.log(chalk.dim(`Session moved to ${cwd}`));
+		return SessionManager.open(reboundPath, sessionDir);
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(chalk.red(`Error: ${message}`));
+		process.exit(1);
+	}
+}
+
+function sessionCwdOrUndefined(sessionFile: string): string | undefined {
+	try {
+		return readSessionCwd(sessionFile);
+	} catch {
+		return undefined;
+	}
+}
+
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
@@ -477,6 +547,27 @@ export async function createSessionManager(
 		}
 	}
 
+	if (parsed.rebind) {
+		const resolved = await resolveSessionPath(parsed.rebind, cwd, sessionDir);
+		if (resolved.type === "not_found") {
+			console.error(chalk.red(`No session found matching '${resolved.arg}'`));
+			process.exit(1);
+		}
+		const sessionCwd = resolved.type === "global" ? resolved.cwd : sessionCwdOrUndefined(resolved.path);
+		if (resolved.type === "local" || sessionCwd === undefined || resolvePath(sessionCwd) === resolvePath(cwd)) {
+			return openSessionOrExit(resolved.path, sessionDir);
+		}
+		if ((await classifySessionRepository(resolved.path, sessionCwd, cwd)) === "different") {
+			console.error(
+				chalk.red(
+					`Refusing to rebind: ${cwd} is a different git repository than ${sessionCwd}. Use --fork '${parsed.rebind}' to copy the session into this directory instead.`,
+				),
+			);
+			process.exit(1);
+		}
+		return rebindSessionOrExit(resolved.path, cwd, sessionDir);
+	}
+
 	if (parsed.session) {
 		const resolved = await resolveSessionPath(parsed.session, cwd, sessionDir);
 
@@ -486,27 +577,27 @@ export async function createSessionManager(
 				return openSessionOrExit(resolved.path, sessionDir);
 
 			case "global": {
-				if (appMode !== "interactive") {
-					// The fork confirmation below blocks on readline, which only an
-					// interactive session can answer. Print, JSON, RPC, and app-server runs
-					// reach here with a TTY attached too (`-p` from a terminal), where the
-					// question hangs the process or resolves as "no" on stdin EOF. Fail fast
-					// with an actionable message instead.
-					console.error(chalk.red(`Session found in different project: ${resolved.cwd}`));
-					console.error(
-						chalk.red(
-							`Cannot confirm forking without an interactive session. Use --fork '${parsed.session}' to fork it into the current directory, or re-run interactively from ${resolved.cwd}.`,
-						),
-					);
-					process.exit(1);
-				}
-				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
-				const shouldFork = await promptConfirm("Fork this session into current directory?");
-				if (!shouldFork) {
-					console.log(chalk.dim("Aborted."));
-					process.exit(0);
-				}
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
+				// Recorded under a folder the OmO desktop moved here: this folder's own session (senpi#2990).
+				if (resolved.cwd !== "" && resolvePath(resolveMovedPath(resolved.cwd)) === resolvePath(cwd))
+					return openSessionOrExit(resolved.path, sessionDir);
+				// The confirmation blocks on readline, which only an interactive session can
+				// answer. Print, JSON, RPC, and app-server runs reach here with a TTY attached
+				// too (`-p` from a terminal), where the question hangs the process or resolves
+				// as "no" on stdin EOF, so they get the exact commands and a non-zero exit.
+				const action = await chooseCrossProjectAction({
+					sessionArg: parsed.session,
+					sessionCwd: resolved.cwd,
+					cwd,
+					match: await classifySessionRepository(resolved.path, resolved.cwd, cwd),
+					interactive: appMode === "interactive",
+					confirm: promptConfirm,
+					out: (line) => console.log(line),
+					err: (line) => console.error(line),
+				});
+				if (action === "rebind") return rebindSessionOrExit(resolved.path, cwd, sessionDir);
+				if (action === "fork") return forkSessionOrExit(resolved.path, cwd, sessionDir);
+				if (action === "abort") console.log(chalk.dim("Aborted."));
+				return process.exit(action === "abort" ? 0 : 1);
 			}
 
 			case "not_found":
@@ -517,23 +608,58 @@ export async function createSessionManager(
 
 	if (parsed.resume) {
 		try {
+			const { selectSession } = await import("./cli/session-picker.ts");
+			const movedOptions = sessionDir === undefined ? {} : { sessionDir };
 			const selectedPath = await selectSession(
-				(onProgress) => SessionManager.list(cwd, sessionDir, onProgress),
-				(onProgress) => SessionManager.listAll(sessionDir, onProgress),
+				(onProgress) => withMovedSessions(SessionManager.list(cwd, sessionDir, onProgress), cwd, movedOptions),
+				async (onProgress) => markMovedSessions(await SessionManager.listAll(sessionDir, onProgress), cwd),
 				settingsManager,
 			);
 			if (!selectedPath) {
 				console.log(chalk.dim("No session selected"));
 				process.exit(0);
 			}
-			return SessionManager.open(selectedPath, sessionDir);
+			const target = await resolveResumeTarget({
+				sessionPath: selectedPath,
+				cwd,
+				...movedOptions,
+				confirm: (selectedCwd) => {
+					console.log(chalk.yellow(`Session found in different project: ${selectedCwd}`));
+					return confirmSameRepositoryRebind({
+						sessionArg: selectedPath,
+						cwd,
+						confirm: promptConfirm,
+						out: (line) => console.log(line),
+					});
+				},
+			}).catch((error: unknown) => {
+				console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+				return process.exit(1);
+			});
+			if (target.rebound) console.log(chalk.dim(`Session moved to ${cwd}`));
+			return SessionManager.open(target.path, sessionDir);
 		} finally {
 			stopThemeWatcher();
 		}
 	}
 
 	if (parsed.continue) {
-		return SessionManager.continueRecent(cwd, sessionDir);
+		// A shared session dir matches sessions the OmO desktop moved here in continueRecent. In the default per-folder
+		// layout they sit in the old folder's dir: continue the newest of those and the folder's own, in place (senpi#2990).
+		const movedHere = sessionDir === undefined ? await movedHereSessionToContinue(cwd) : undefined;
+		if (movedHere !== undefined) return SessionManager.open(movedHere, sessionDir);
+		const recent = SessionManager.continueRecent(cwd, sessionDir);
+		const recentFile = recent.getSessionFile();
+		if (recentFile !== undefined && existsSync(recentFile)) return recent;
+		const movedChoice = await movedSessionToContinue({
+			cwd,
+			...(sessionDir === undefined ? {} : { sessionDir }),
+			interactive: appMode === "interactive",
+			confirm: promptConfirm,
+			out: (line) => console.log(line),
+			err: (line) => console.error(line),
+		});
+		return movedChoice === undefined ? recent : rebindSessionOrExit(movedChoice, cwd, sessionDir);
 	}
 
 	if (parsed.sessionId) {
@@ -569,6 +695,12 @@ function buildSessionOptions(
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
+	if (parsed.provider && !parsed.model) {
+		diagnostics.push({
+			type: "error",
+			message: `--provider requires --model (for example: --provider ${parsed.provider} --model <pattern>)`,
+		});
+	}
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -580,10 +712,11 @@ function buildSessionOptions(
 			diagnostics.push({ type: "warning", message: resolved.warning });
 		}
 		if (resolved.error) {
-			diagnostics.push({ type: "error", message: resolved.error });
+			diagnostics.push({ type: "error", message: resolved.error, code: "model_unresolved" });
 		}
 		if (resolved.model) {
 			options.model = resolved.model;
+			options.serviceTier = resolved.serviceTier;
 			options.initialModelProvenance = "cli";
 			// Allow "--model <pattern>:<thinking>" as a shorthand.
 			// Explicit --thinking still takes precedence (applied later).
@@ -635,6 +768,7 @@ function buildSessionOptions(
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel,
 			thinkingSelection: sm.thinkingSelection,
+			serviceTier: sm.serviceTier,
 		}));
 	}
 
@@ -707,8 +841,17 @@ export function createCliRuntimeFactory(
 		extensionFactories?: InlineExtension[];
 		startupSettingsManager?: SettingsManager;
 		startupLoadingIndicator?: ReturnType<typeof createStartupLoadingIndicator>;
+		/**
+		 * One model runtime for every session this factory creates. A shared host's
+		 * sessions all live in one agent dir, so they would each build an identical
+		 * runtime - ~100 ms of loop CPU per open that, concurrent, every open pays
+		 * N times over (senpi#1844). Provider registration is keyed by id and
+		 * merges, so replaying each session's extension providers into one runtime
+		 * is idempotent.
+		 */
+		modelRuntime?: ModelRuntime;
 	} = {},
-): CreateAgentSessionRuntimeFactory {
+): PreparableRuntimeFactory {
 	const { parsed, cwd, agentDir, appMode } = configuration;
 	const extensionFactories = local.extensionFactories ?? builtInExtensions;
 	const startupSettingsManager = local.startupSettingsManager ?? SettingsManager.create(cwd, agentDir);
@@ -727,8 +870,18 @@ export function createCliRuntimeFactory(
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
-	return async ({ cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext, launchProfile }) => {
-		const isInitialRuntime = sessionStartEvent === undefined;
+	// The cwd-bound services one session needs, built alone: the runtime factory below builds them
+	// before its session, and a multi-session host's `warm` builds and drops them (senpi#2314).
+	const createServices = async ({
+		cwd,
+		agentDir,
+		projectTrustContext,
+		launchProfile,
+		mcpRegistry,
+		isInitialRuntime,
+	}: Omit<Parameters<CreateAgentSessionRuntimeFactory>[0], "sessionManager" | "sessionStartEvent"> & {
+		isInitialRuntime: boolean;
+	}) => {
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
 		const cachedProjectTrust = projectTrustByCwd.get(cwd);
 		const hasTrustRequiringResources = hasTrustRequiringProjectResources(cwd);
@@ -740,12 +893,16 @@ export function createCliRuntimeFactory(
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		// The opener's per-session fallback policy is an in-memory override: never saved, never shared.
+		if (launchProfile?.retryFallback) applyRetryFallbackProfile(runtimeSettingsManager, launchProfile.retryFallback);
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
+			...(local.modelRuntime === undefined ? {} : { modelRuntime: local.modelRuntime }),
+			mcpRegistry,
 			modelRuntimeSignal: AbortSignal.timeout(15_000),
-			extensionFlagValues: parsed.unknownFlags,
+			extensionFlagValues: sessionExtensionFlagValues(parsed.unknownFlags, launchProfile),
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
 				? {
 						resolveProjectTrust: async ({ extensionsResult }) => {
@@ -774,10 +931,11 @@ export function createCliRuntimeFactory(
 					}
 				: undefined,
 			resourceLoaderOptions: {
-				sharedHostEnabled: shouldJoinSharedHost(appMode, {
-					enableEnv: isTruthyEnvFlag(envValue("ENABLE_SHARED_HOST")),
-					settingEnabled: runtimeSettingsManager.getExperimentalSharedHost(),
-				}),
+				// Per-session identity reaches the extensions this session loads and stops
+				// there: it is deliberately NOT merged into `parsed`, so it can never move
+				// a model, an auth decision or a CLI flag.
+				sessionKind: launchProfile?.sessionKind,
+				sessionContext: launchProfile?.sessionContext,
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,
 				additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
@@ -792,12 +950,40 @@ export function createCliRuntimeFactory(
 				extensionFactories,
 			},
 		});
+		return { services, projectTrustDiagnostics };
+	};
+	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+		cwd,
+		agentDir,
+		sessionManager,
+		sessionStartEvent,
+		projectTrustContext,
+		launchProfile,
+		mcpRegistry,
+	}) => {
+		const isInitialRuntime = sessionStartEvent === undefined;
+		const markSwitch = (label: string): void => {
+			if (sessionStartEvent?.reason === "resume") time(label, "switch");
+		};
+		const { services, projectTrustDiagnostics } = await createServices({
+			cwd,
+			agentDir,
+			...(projectTrustContext !== undefined ? { projectTrustContext } : {}),
+			...(launchProfile !== undefined ? { launchProfile } : {}),
+			...(mcpRegistry !== undefined ? { mcpRegistry } : {}),
+			isInitialRuntime,
+		});
+		markSwitch("services");
 		const { settingsManager, modelRuntime, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...projectTrustDiagnostics,
 			...services.diagnostics,
-			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
+			...collectSettingsDiagnosticsWithContext(settingsManager, "runtime creation"),
 			...collectExtensionLoadDiagnostics(resourceLoader.getExtensions().errors),
+			...(resourceLoader.getExtensions().warnings ?? []).map(({ path, warning }) => ({
+				type: "warning" as const,
+				message: `Extension package "${path}": ${warning}`,
+			})),
 		];
 
 		const modelPatterns = getModelNarrowingPatterns({
@@ -853,13 +1039,16 @@ export function createCliRuntimeFactory(
 		if (isInitialRuntime) {
 			startupLoadingIndicator.setPhase("opening session");
 		}
+		markSwitch("sessionOptions");
 		const created = await createAgentSessionFromServices({
 			services,
 			sessionManager,
 			sessionStartEvent,
 			model: sessionOptions.model,
+			initialModelProvenance: sessionOptions.initialModelProvenance,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			thinkingSelection: sessionOptions.thinkingSelection,
+			serviceTier: sessionOptions.serviceTier,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,
@@ -870,11 +1059,17 @@ export function createCliRuntimeFactory(
 				parsed,
 				sessionManager.hasContextMessages(),
 				parseClientCapabilities(envValue("RPC_CLIENT_CAPABILITIES")),
+				launchProfile?.autoTitle,
 			),
+			promptSurface: launchProfile?.promptSurface,
+			browserEngine: launchProfile?.browserEngine,
 		});
+		markSwitch("createSession");
 		const cliThinkingOverride = runtimeParsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
+			// senpi#2395: re-apply the level the CLI asked for, so a clamp keeps its requested level and reason.
+			const selection = created.session.thinkingSelection as ClampedThinkingSelection | undefined;
+			created.session.setThinkingLevel(selection?.requested ?? created.session.thinkingLevel);
 		}
 
 		return {
@@ -883,10 +1078,19 @@ export function createCliRuntimeFactory(
 			diagnostics,
 		};
 	};
+	// A host open creates its session with no start event, so a warm prepares exactly that open.
+	return Object.assign(createRuntime, {
+		prepare: async (options: PrepareRuntimeOptions): Promise<void> => {
+			await createServices({ ...options, isInitialRuntime: true });
+		},
+	});
 }
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	// The pre-main phase - runtime boot, cli.js, and this module's static import graph - is already
+	// over when the first statement runs, so it is read from the process clock rather than measured.
+	recordTiming("processStart->main", Math.round(process.uptime() * 1000));
 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(envValue("OFFLINE"));
 	if (offlineMode) {
@@ -898,25 +1102,20 @@ export async function main(args: string[], options?: MainOptions) {
 		return;
 	}
 
+	if (isModelsDiscoverCommand(args)) {
+		process.exitCode = await runModelsDiscoverCommand(args.slice(2));
+		return;
+	}
+
 	// Internal launch surface used by bundled/rebranded runtimes. It is deliberately
-	// not accepted by parseArgs, so existing CLI modes remain unchanged. A rebranded
-	// wrapper may prepend its own `--extension <dir>` before forwarding argv, so the
-	// route is matched through the bounded scan rather than at argv[0] alone.
-	const supervisorArgs = findInternalSupervisorArgs(args);
-	if (supervisorArgs) {
-		const launch = parseSupervisorArgs(supervisorArgs);
-		if (!launch) {
-			// Fail closed: an internal protocol fault must never fall through to the
-			// public parser and surface as a confusing "Unknown option" error.
-			console.error("invalid internal RPC host supervisor arguments");
-			process.exit(2);
-		}
-		await runHostSupervisor(launch);
+	// not accepted by parseArgs, so existing CLI modes remain unchanged. The route and
+	// the RPC host graph behind it live in ./modes/rpc/supervisor-route.ts.
+	if (await dispatchInternalSupervisor(args)) {
 		return;
 	}
 
 	if (process.platform === "win32") {
-		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+		cleanupWindowsSelfUpdateQuarantine(getInstallPackageDir());
 	}
 
 	const cwd = process.cwd();
@@ -929,7 +1128,7 @@ export async function main(args: string[], options?: MainOptions) {
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();
 
-	if (await handlePackageCommand(args, { extensionFactories })) {
+	if (await dispatchPackageCommand(args, { extensionFactories })) {
 		const exitCode = process.exitCode ?? 0;
 		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {
 			// We normally prefer process.exit(0) for package commands so bad extensions cannot keep
@@ -938,16 +1137,29 @@ export async function main(args: string[], options?: MainOptions) {
 			// https://github.com/nodejs/node/issues/56645
 			return;
 		}
-		process.exit(exitCode);
+		await exitAfterOutput("", exitCode);
 		return;
 	}
 
-	if (await handleConfigCommand(args, { extensionFactories })) {
+	if (await dispatchConfigCommand(args, { extensionFactories })) {
 		return;
 	}
 
-	if (await handleAppServerCommand(args)) {
+	if (await dispatchAppServerCommand(args)) {
 		return;
+	}
+
+	// The shared-daemon command: one JSON line on stdout and an exit code that classifies it, so it
+	// exits here rather than falling through into argument parsing and the interactive path.
+	const hostExitCode = await dispatchHostCommand(args);
+	if (hostExitCode !== undefined) {
+		await exitAfterOutput("", hostExitCode);
+	}
+
+	// Durable scheduled prompts: fired out of process, so a job scheduled by an exited --print run still runs.
+	const scheduleExitCode = await dispatchScheduleCommand(args);
+	if (scheduleExitCode !== undefined) {
+		await exitAfterOutput("", scheduleExitCode);
 	}
 
 	const parsed = parseArgs(args);
@@ -963,8 +1175,7 @@ export async function main(args: string[], options?: MainOptions) {
 	time("parseArgs");
 
 	if (parsed.version) {
-		console.log(DISPLAY_VERSION);
-		process.exit(0);
+		await printThenExit(() => console.log(DISPLAY_VERSION), 0);
 	}
 
 	if (parsed.export) {
@@ -977,8 +1188,7 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.red(`Error: ${message}`));
 			process.exit(1);
 		}
-		console.log(`Exported to: ${result}`);
-		process.exit(0);
+		await printThenExit(() => console.log(`Exported to: ${result}`), 0);
 	}
 
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
@@ -1001,6 +1211,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	validateForkFlags(parsed);
+	validateRebindFlags(parsed);
 	validateSessionIdFlags(parsed);
 
 	// Run migrations (pass cwd for project-local migrations)
@@ -1008,15 +1219,36 @@ export async function main(args: string[], options?: MainOptions) {
 	time("runMigrations");
 
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
-	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
+	reportDiagnostics(collectSettingsDiagnosticsWithContext(startupSettingsManager, "startup session lookup"));
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 
+	// Help is answered from the flags alone, so it stops here instead of continuing into the model
+	// runtime, the session manager and the rest of the resource load. The flags are cached for the
+	// next run, which `cli.ts` then answers before this module is even imported.
+	if (isPlainHelpRequest(parsed)) {
+		const projectTrusted = resolveHelpProjectTrust(parsed, cwd, agentDir);
+		const scope = helpFlagsScope(parsed, cwd, agentDir, projectTrusted);
+		const { flags, extensionPaths } = await resolveHelpExtensionFlags({
+			cwd,
+			agentDir,
+			settingsManager: SettingsManager.create(cwd, agentDir, { projectTrusted }),
+			additionalExtensionPaths: resolvedExtensionPaths ?? [],
+			noExtensions: parsed.noExtensions === true,
+			...(extensionFactories ? { extensionFactories } : {}),
+		});
+		writeHelpFlagsCache({ scope, flags, extensionPaths });
+		await printThenExit(() => {
+			printHelp(flags);
+			printTimings();
+		}, 0);
+	}
+
 	if (parsed.listTips) {
-		listTips();
-		process.exit(0);
+		const { listTips } = await import("./cli/list-tips.ts");
+		await printThenExit(listTips, 0);
 	}
 
 	if (parsed.listModels !== undefined) {
@@ -1040,12 +1272,11 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		reportDiagnostics([
 			...services.diagnostics,
-			...collectSettingsDiagnostics(services.settingsManager, "model listing"),
+			...collectSettingsDiagnosticsWithContext(services.settingsManager, "model listing"),
 			...collectAuthDiagnostics(services.authStorage, "model listing"),
 		]);
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-		await listModels(services.modelRuntime, searchPattern);
-		process.exit(0);
+		await printThenExit(() => listModels(services.modelRuntime, searchPattern), 0);
 	}
 
 	// Experimental first-time setup: theme choice and analytics opt-in.
@@ -1065,15 +1296,46 @@ export async function main(args: string[], options?: MainOptions) {
 		startupSettingsManager.applyOverrides({ theme: parsed.useTheme });
 	}
 
+	// Installs nothing unless SENPI_MEMORY_REPORT=1; then SIGUSR2 writes a memory report for every live session.
+	installMemoryReportSignal();
+
 	if (appMode === "rpc" && parsed.multiSession) {
 		if (options?.extensionFactories?.length)
 			throw new Error("Shared RPC workers require file-backed extensions; inline factories cannot cross isolates");
-		const workerConfiguration = { parsed, cwd, agentDir, appMode };
+		const runtimeConfiguration = { parsed, cwd, agentDir, appMode };
+		// Socket hosts (the machine-wide daemon) run every session IN this process:
+		// createHostCore selects the worker registry only when a workerConfiguration
+		// is passed, so withholding it is what selects the uncapped in-process registry.
+		const sessionRuntime = resolveSessionRuntime(parsed);
+		const { runMultiSessionHost } = await import("./modes/rpc/multi-session-host.ts");
+		// In-process sessions share the host's model runtime: one agent dir, one
+		// catalog. Worker sessions build their own inside the isolate - an object
+		// cannot cross that boundary - so the shared one is offered only here.
+		const hostModelRuntime =
+			sessionRuntime === "worker"
+				? undefined
+				: await ModelRuntime.create({
+						credentials: AuthStorage.create(join(agentDir, "auth.json")),
+						authPath: join(agentDir, "auth.json"),
+						agentDir,
+						modelsPath: join(agentDir, "models.json"),
+						signal: AbortSignal.timeout(15_000),
+					});
+		// The multi-session host below never returns, so the initTheme() call further
+		// down main() is unreachable on this path. Extensions load per open_session and
+		// read the theme proxy: the worker runtime initializes the theme inside each
+		// session worker, but the in-process runtime (the socket-host default) shares
+		// this process, so the host must initialize the theme before serving sessions -
+		// otherwise theme-touching extensions fail with "Theme not initialized. Call
+		// initTheme() first." (senpi#1894).
+		initTheme(startupSettingsManager.getTheme(), false);
 		printTimings();
 		await runMultiSessionHost({
 			agentDir,
-			createRuntime: createCliRuntimeFactory(workerConfiguration),
-			workerConfiguration,
+			createRuntime: createCliRuntimeFactory(runtimeConfiguration, {
+				...(hostModelRuntime === undefined ? {} : { modelRuntime: hostModelRuntime }),
+			}),
+			...(sessionRuntime === "worker" ? { workerConfiguration: runtimeConfiguration } : {}),
 			cwd,
 			creationModel:
 				parsed.provider && parsed.model ? { provider: parsed.provider, modelId: parsed.model } : undefined,
@@ -1154,40 +1416,27 @@ export async function main(args: string[], options?: MainOptions) {
 		startupLoadingIndicator.stop();
 	});
 	time("createAgentSessionRuntime");
-	let selectedRuntime = runtime;
-	if (isTruthyEnvFlag(envValue("DISABLE_SHARED_HOST"))) {
-		console.error(
-			chalk.yellow(
-				"DISABLE_SHARED_HOST is obsolete: the shared session host is now off by default. Enable the experimental.sharedHost setting (or set the brand-prefixed ENABLE_SHARED_HOST=1 env flag) to opt in.",
-			),
-		);
-	}
-	if (
-		shouldJoinSharedHost(appMode, {
-			enableEnv: isTruthyEnvFlag(envValue("ENABLE_SHARED_HOST")),
-			settingEnabled: runtime.services.settingsManager.getExperimentalSharedHost(),
-		})
-	) {
-		const socket = envValue("RPC_SOCKET") ?? resolve(agentDir, "rpc", "rpc.sock");
-		selectedRuntime = await createInteractiveHostRuntime(runtime, {
-			socket,
-			agentDir,
-			onWarning: (warning) => console.error(chalk.yellow(warning.message)),
-		});
-	}
-	const { services, session, modelFallbackMessage } = selectedRuntime;
+	await prepareSessionOpening(sessionManager, appMode);
+	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRuntime, resourceLoader } = services;
 	setCapabilityOverrides(settingsManager.getTerminalCapabilityOverrides());
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
+	const loadedExtensions = resourceLoader.getExtensions().extensions;
+	const extensionFlags = loadedExtensions.flatMap((extension) => Array.from(extension.flags.values()));
 	if (parsed.help) {
-		const extensionFlags = resourceLoader
-			.getExtensions()
-			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
-		printHelp(extensionFlags);
-		process.exit(0);
+		await printThenExit(() => printHelp(extensionFlags), 0);
 	}
+	time("extensionFlags");
+	// Every full launch refreshes what `--help` reads, so the fast path stays warm without a help
+	// run of its own.
+	writeHelpFlagsCache({
+		scope: helpFlagsScope(parsed, cwd, agentDir, settingsManager.isProjectTrusted()),
+		flags: extensionFlags,
+		extensionPaths: loadedExtensions.map((extension) => extension.resolvedPath),
+	});
+	time("helpFlagsCache");
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
 	let stdinContent: string | undefined;
@@ -1198,6 +1447,9 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("readPipedStdin");
+	// An RPC process always has a parent that watches its exit; every other mode dies unobserved.
+	recordProcessLifetime(agentDir, appMode, { supervised: appMode === "rpc" });
+	time("recordProcessLifetime");
 
 	const { initialMessage, initialImages, initialTitlePrompt } = await prepareInitialMessage(
 		parsed,
@@ -1218,6 +1470,11 @@ export async function main(args: string[], options?: MainOptions) {
 
 	time("resolveModelScope");
 	reportDiagnostics(runtime.diagnostics);
+	// senpi#2395: print/json/RPC runs report a startup thinking clamp on stderr; the TUI shows its own warning.
+	const startupThinkingClamp = runtime.session.startupThinkingClamp;
+	if (appMode !== "interactive" && startupThinkingClamp) {
+		reportDiagnostics([{ type: "warning", message: formatThinkingClampWarning(startupThinkingClamp) }]);
+	}
 	if (appMode !== "interactive") {
 		reportDiagnostics(collectAuthDiagnostics(services.authStorage, "runtime creation"));
 	}
@@ -1250,15 +1507,24 @@ export async function main(args: string[], options?: MainOptions) {
 			.finally(() => clearTimeout(timeout));
 	}
 
+	// Every mode hosts the eval kernel, and a worker thread that is terminated takes its children's exit
+	// watchers with it, so single-session modes arm the same reaper the multi-session host runs (#1962). The
+	// TUI owns stderr, so interactive mode reaps silently.
+	const stopChildReaper = await startHostChildReaper(
+		appMode === "interactive" ? () => {} : (message) => void process.stderr.write(`${message}\n`),
+	);
+
 	if (appMode === "rpc") {
+		const { runRpcMode } = await import("./modes/rpc/rpc-mode.ts");
 		printTimings();
 		await runRpcMode(runtime);
 	} else if (appMode === "interactive") {
 		// Keep the TUI graph out of headless RPC children. This is intentionally at the
 		// mode seam: interactive startup still loads the same module before first use.
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
-		const interactiveMode = new InteractiveMode(selectedRuntime, {
+		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
+			legacyPiEditNotice: legacyPiEditStartupNotice(),
 			modelFallbackMessage,
 			autoTrustOnReloadCwd,
 			initialMessage,
@@ -1285,7 +1551,9 @@ export async function main(args: string[], options?: MainOptions) {
 			if (process.stderr.writableLength > 0) {
 				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
 			}
-			return;
+			// Benchmark runs leave the TUI's terminal handles active, so returning here only parks the
+			// loop; the measurement is complete, so the process ends with it.
+			process.exit(0);
 		}
 
 		printTimings();
@@ -1299,6 +1567,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialImages,
 		});
 		reportDiagnostics(collectAuthDiagnostics(services.authStorage, "print mode"));
+		stopChildReaper();
 		stopThemeWatcher();
 		restoreStdout();
 		if (exitCode !== 0) {

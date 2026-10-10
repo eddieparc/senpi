@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mapSdkToolNameToPi, resolveSdkTools } from "../../src/core/extensions/builtin/anthropic-subscription/tools.ts";
 import askUserExtension from "../../src/core/extensions/builtin/ask-user/index.ts";
 import { getPendingQuestions } from "../../src/core/extensions/builtin/ask-user/registry.ts";
+import { askUserRenderers } from "../../src/core/extensions/builtin/ask-user/render.ts";
 import { WAIT_FLAG_STEER_TEXT } from "../../src/core/extensions/builtin/ask-user/schema.ts";
-import { mapSdkToolNameToPi, resolveSdkTools } from "../../src/core/extensions/builtin/claude-sdk-oauth/tools.ts";
-import type { ExtensionAPI, ExtensionContext, QuestionResponse } from "../../src/core/extensions/types.ts";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ExtensionToolContext,
+	QuestionResponse,
+} from "../../src/core/extensions/types.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const args = {
@@ -82,18 +88,28 @@ describe("ask-user builtin", () => {
 	it.each([
 		[false, false],
 		[true, true],
-	])("does not register when disabled (%s, flag %s)", async (enabled, flag) => {
-		const { runner } = await setup(enabled, flag);
-		expect(runner.getFlags().get("no-ask-user")).toMatchObject({ type: "boolean", default: false });
-		expect(
-			runner
-				.getAllRegisteredTools()
-				.filter((t) => ["ask_user_question", "request_user_input"].includes(t.definition.name)),
-		).toEqual([]);
-	});
+	])(
+		"does not register or activate when disabled, yet still renders its cards (%s, flag %s)",
+		async (enabled, flag) => {
+			const { h, runner, tool, ctx } = await setup(enabled, flag);
+			expect(runner.getFlags().get("no-ask-user")).toMatchObject({ type: "boolean", default: false });
+			expect(
+				runner
+					.getAllRegisteredTools()
+					.filter((t) => ["ask_user_question", "request_user_input"].includes(t.definition.name)),
+			).toEqual([]);
+			expect(
+				h.session.getActiveToolNames().filter((name) => ["ask_user_question", "request_user_input"].includes(name)),
+			).toEqual([]);
+			for (const name of ["ask_user_question", "request_user_input"])
+				expect(askUserRenderers(name)?.renderCall).toBeTypeOf("function");
+			expect(tool).toBeUndefined();
+			expect(ctx.ui.question).not.toHaveBeenCalled();
+		},
+	);
 	it("returns blocking answers through the formatter", async () => {
 		const { tool, ctx, deliveries } = await setup();
-		const result = await required(tool).execute("blocking", args, undefined, undefined, ctx);
+		const result = await required(tool).execute("blocking", args, undefined, undefined, ctx as ExtensionToolContext);
 		expect(result.content).toEqual([{ type: "text", text: "Library: A" }]);
 		expect(result.details).toMatchObject({ status: "answered", answers: { "Which library?": "A" } });
 		// A blocking answer travels as the tool result only.
@@ -101,6 +117,7 @@ describe("ask-user builtin", () => {
 	});
 	it("returns async acceptance before answer and tracks wake source until settlement", async () => {
 		const { tool, ctx, wakeEvents, deliveries } = await setup();
+		vi.useFakeTimers({ toFake: ["Date"], now: 0 });
 		const completion = Promise.withResolvers<QuestionResponse>();
 		const resolved = Promise.withResolvers<void>();
 		ctx.ui.question = vi.fn(() => completion.promise);
@@ -109,7 +126,7 @@ describe("ask-user builtin", () => {
 			{ ...args, waitForAnswer: false },
 			undefined,
 			undefined,
-			ctx,
+			ctx as ExtensionToolContext,
 		);
 		expect(result.details).toMatchObject({ accepted: true, requestId: "async", status: "pending" });
 		expect(ctx.ui.question).toHaveBeenCalledWith(
@@ -122,7 +139,11 @@ describe("ask-user builtin", () => {
 		await resolved.promise;
 		expect(getPendingQuestions(ctx.sessionManager.getSessionId())).toEqual([]);
 		expect(wakeEvents).toEqual([
-			{ source: "ask-user", activeCount: 1, items: [{ id: "async", description: "Library" }] },
+			{
+				source: "ask-user",
+				activeCount: 1,
+				items: [{ id: "async", description: "Library", deadlineAtMs: 1_800_000 }],
+			},
 			{ source: "ask-user", activeCount: 0, items: [] },
 		]);
 		expect(deliveries).toEqual(["[Answer to question async]\nLibrary: A"]);
@@ -134,7 +155,9 @@ describe("ask-user builtin", () => {
 		ctx.hasUI = false;
 		const question = ctx.ui.question;
 		if (mode === "tui") ctx.ui.question = undefined;
-		expect((await required(tool).execute("none", args, undefined, undefined, ctx)).details).toMatchObject({
+		expect(
+			(await required(tool).execute("none", args, undefined, undefined, ctx as ExtensionToolContext)).details,
+		).toMatchObject({
 			status: "unavailable",
 		});
 		expect(h.session.getActiveToolNames()).not.toContain("ask_user_question");
@@ -143,7 +166,9 @@ describe("ask-user builtin", () => {
 	it("calls a supplied question bridge even when hasUI is false", async () => {
 		const { tool, ctx } = await setup();
 		ctx.hasUI = false;
-		expect((await required(tool).execute("bridge", args, undefined, undefined, ctx)).details).toMatchObject({
+		expect(
+			(await required(tool).execute("bridge", args, undefined, undefined, ctx as ExtensionToolContext)).details,
+		).toMatchObject({
 			status: "answered",
 		});
 	});
@@ -154,7 +179,9 @@ describe("ask-user builtin", () => {
 		ctx.ui.question = vi.fn(
 			async (): Promise<QuestionResponse> => ({ status: "unavailable", answers: {}, unanswered: ["q1"] }),
 		);
-		expect((await required(tool).execute("rpc", args, undefined, undefined, ctx)).details).toMatchObject({
+		expect(
+			(await required(tool).execute("rpc", args, undefined, undefined, ctx as ExtensionToolContext)).details,
+		).toMatchObject({
 			status: "unavailable",
 		});
 		expect(ctx.ui.question).toHaveBeenCalledOnce();
@@ -166,13 +193,21 @@ describe("ask-user builtin", () => {
 		const wireName = mapped.customToolNameToSdk.get(definition.name);
 		expect(wireName).toBe("mcp__custom-tools__ask_user_question");
 		expect(mapSdkToolNameToPi(required(wireName), mapped.customToolNameToPi)).toBe(definition.name);
-		expect((await definition.execute("sdk", args, undefined, undefined, ctx)).details).toMatchObject({
+		expect(
+			(await definition.execute("sdk", args, undefined, undefined, ctx as ExtensionToolContext)).details,
+		).toMatchObject({
 			status: "answered",
 		});
 	});
 	it("rejects a missing wait flag before opening UI", async () => {
 		const { tool, ctx } = await setup();
-		const result = await required(tool).execute("missing", { questions: args.questions }, undefined, undefined, ctx);
+		const result = await required(tool).execute(
+			"missing",
+			{ questions: args.questions },
+			undefined,
+			undefined,
+			ctx as ExtensionToolContext,
+		);
 		expect(result.content).toEqual([{ type: "text", text: WAIT_FLAG_STEER_TEXT }]);
 		expect(ctx.ui.question).not.toHaveBeenCalled();
 	});
@@ -180,7 +215,13 @@ describe("ask-user builtin", () => {
 		const { tool, ctx } = await setup();
 		const controller = new AbortController();
 		ctx.ui.question = vi.fn(() => new Promise<QuestionResponse>(() => {}));
-		const execution = required(tool).execute("abort", args, controller.signal, undefined, ctx);
+		const execution = required(tool).execute(
+			"abort",
+			args,
+			controller.signal,
+			undefined,
+			ctx as ExtensionToolContext,
+		);
 		controller.abort();
 		expect((await execution).details).toMatchObject({ status: "cancelled" });
 		expect(getPendingQuestions(ctx.sessionManager.getSessionId())).toEqual([]);
@@ -193,7 +234,7 @@ describe("ask-user builtin", () => {
 			progress = opts;
 			return new Promise<QuestionResponse>(() => {});
 		});
-		const execution = required(tool).execute("progress", args, undefined, undefined, ctx);
+		const execution = required(tool).execute("progress", args, undefined, undefined, ctx as ExtensionToolContext);
 		for (let n = 0; n < 4; n++) {
 			await vi.advanceTimersByTimeAsync(29 * 60_000);
 			required(progress).onProgress?.({ answers: { q1: { selected: ["A"] } } });
@@ -210,17 +251,102 @@ describe("ask-user builtin", () => {
 		vi.useFakeTimers();
 		const { tool, ctx, runner } = await setup();
 		ctx.ui.question = vi.fn(() => new Promise<QuestionResponse>(() => {}));
-		const first = required(tool).execute("timeout", args, undefined, undefined, ctx);
+		const first = required(tool).execute("timeout", args, undefined, undefined, ctx as ExtensionToolContext);
 		await vi.advanceTimersByTimeAsync(1_800_000);
 		expect((await first).details).toMatchObject({ status: "timed_out" });
-		expect((await required(tool).execute("again", args, undefined, undefined, ctx)).details).toMatchObject({
+		expect(
+			(await required(tool).execute("again", args, undefined, undefined, ctx as ExtensionToolContext)).details,
+		).toMatchObject({
 			status: "unavailable",
 		});
 		expect(ctx.ui.question).toHaveBeenCalledTimes(1);
 		await runner.emit({ type: "agent_end", messages: [] });
 		ctx.ui.question = vi.fn(async () => answer);
-		expect((await required(tool).execute("next", args, undefined, undefined, ctx)).details).toMatchObject({
+		expect(
+			(await required(tool).execute("next", args, undefined, undefined, ctx as ExtensionToolContext)).details,
+		).toMatchObject({
 			status: "answered",
 		});
+	});
+
+	it("refuses a required question's gated action through the real tool on timeout and on the re-ask guard", async () => {
+		// given a required question the user never answers
+		vi.useFakeTimers();
+		const { tool, ctx } = await setup();
+		ctx.ui.question = vi.fn(() => new Promise<QuestionResponse>(() => {}));
+		const gated = { ...args, required: true };
+
+		// when it times out, and a second required question is asked in the same turn
+		const first = required(tool).execute("gate", gated, undefined, undefined, ctx as ExtensionToolContext);
+		await vi.advanceTimersByTimeAsync(1_800_000);
+		const timedOut = await first;
+		const reask = await required(tool).execute(
+			"gate-again",
+			gated,
+			undefined,
+			undefined,
+			ctx as ExtensionToolContext,
+		);
+
+		// then neither tool result invites the model to proceed
+		for (const outcome of [timedOut, reask]) {
+			const text = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+			expect(text).toContain("do not take the action it gates");
+			expect(text).not.toMatch(/best judgment|continue without asking/i);
+		}
+	});
+
+	it("keeps a UI failure's reason and refuses the gated action for a required question", async () => {
+		// given a required question whose UI fails while it is open
+		const { tool, ctx } = await setup();
+		ctx.ui.question = vi.fn(async (_request, options) => {
+			options?.onProgress?.({ answers: { q1: { selected: [], text: "only on staging" } } });
+			throw new Error("boom");
+		});
+
+		// when the blocking call settles
+		const outcome = await required(tool).execute(
+			"gate-ui",
+			{ ...args, required: true },
+			undefined,
+			undefined,
+			ctx as ExtensionToolContext,
+		);
+
+		// then the reason is kept and the model is told not to take the gated action
+		const text = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		expect(text).toContain("Question UI failed: boom");
+		expect(text).toContain("do not take the action it gates");
+		const userWords = (outcome.details as { userWords?: Array<{ label: string }> }).userWords ?? [];
+		expect(userWords).toHaveLength(1);
+		for (const word of userWords) expect(text).toContain(word.label);
+		expect(text).toContain("not an answer");
+		expect(text).not.toContain("The user dismissed the question.");
+	});
+
+	it("sends the user's typed draft along with a dismissed required question", async () => {
+		// given a required question the user typed a draft into and then dismissed
+		const { tool, ctx } = await setup();
+		ctx.ui.question = vi.fn(async () => ({
+			status: "cancelled" as const,
+			answers: { q1: { selected: [], text: "only after tests pass" } },
+			unanswered: [],
+		}));
+
+		// when the blocking call settles
+		const outcome = await required(tool).execute(
+			"gate-draft",
+			{ ...args, required: true },
+			undefined,
+			undefined,
+			ctx as ExtensionToolContext,
+		);
+
+		// then the refusal points at the draft and the draft travels in the result details
+		const text = outcome.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		expect(text).toContain("do not take the action it gates");
+		expect(text).not.toContain("only after tests pass");
+		const userWords = (outcome.details as { userWords?: Array<{ text: string }> }).userWords ?? [];
+		expect(userWords.map((word) => word.text)).toContain("only after tests pass");
 	});
 });

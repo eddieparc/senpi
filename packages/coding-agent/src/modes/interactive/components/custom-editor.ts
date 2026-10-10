@@ -1,4 +1,12 @@
-import { Editor, type EditorOptions, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	Editor,
+	type EditorOptions,
+	type EditorTheme,
+	isWarpWslSession,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.ts";
 import type { StatusIndicator } from "./status-indicator.ts";
 
@@ -19,6 +27,7 @@ export class CustomEditor extends Editor {
 	private configuredPaddingX: number;
 	private promptPaddingX: number;
 	private workingStatusIndicator: StatusIndicator | undefined;
+	private replyLabel: string | undefined;
 	public readonly embedWorkingStatus: boolean;
 	public actionHandlers: Map<AppKeybinding, () => void> = new Map();
 
@@ -61,7 +70,19 @@ export class CustomEditor extends Editor {
 		this.workingStatusIndicator = indicator;
 	}
 
+	setReplyLabel(label: string | undefined): void {
+		this.replyLabel = label;
+	}
+
 	protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+		if (this.replyLabel && width >= 5) {
+			const label = truncateToWidth(this.replyLabel, width - 4, "…");
+			return (
+				this.borderColor("── ") +
+				label +
+				this.borderColor(` ${"─".repeat(Math.max(0, width - visibleWidth(label) - 4))}`)
+			);
+		}
 		if (!this.embedWorkingStatus || !this.workingStatusIndicator || width <= 0) {
 			return super.renderTopBorder(width, hiddenLineCount);
 		}
@@ -119,8 +140,11 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Check for clipboard paste keybinding
-		if (this.keybindings.matches(data, "app.clipboard.pasteImage")) {
+		// Warp on WSL sends an empty bracketed paste for a clipboard bitmap.
+		if (
+			this.keybindings.matches(data, "app.clipboard.pasteImage") ||
+			(data === "\x1b[200~\x1b[201~" && isWarpWslSession())
+		) {
 			this.onPasteImage?.();
 			return;
 		}

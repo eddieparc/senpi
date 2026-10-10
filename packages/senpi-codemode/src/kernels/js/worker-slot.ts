@@ -1,8 +1,10 @@
+import type { MessagePort } from "node:worker_threads";
 import type { HostToKernelMessage, KernelToHostMessage } from "../../bridge/protocol.ts";
 import type { WorkerLike } from "./inline-worker.ts";
 import { retireWorker, type WorkerRetirement } from "./interrupt-bounds.ts";
 import type { JavaScriptKernelMode } from "./kernel-contract.ts";
 import type { JavaScriptKernelOptions } from "./local-module-loader.ts";
+import { KernelWebViewClients } from "./webview-host.ts";
 import { WorkerStartupCancelledError } from "./worker-host.ts";
 import { startWorkerWithInlineFallback } from "./worker-startup.ts";
 
@@ -17,6 +19,8 @@ export class WorkerSlot {
 	readonly #options: JavaScriptKernelOptions;
 	readonly #listeners: WorkerSlotListeners;
 	#worker: WorkerLike | null = null;
+	#lastProcessPid: number | undefined;
+	#webViews: KernelWebViewClients | null = null;
 	#mode: JavaScriptKernelMode = "worker";
 	#generation = 0;
 	#ready: Promise<void> | null = null;
@@ -31,6 +35,12 @@ export class WorkerSlot {
 		return this.#mode;
 	}
 
+	get processPid(): number | undefined {
+		const worker = this.#worker;
+		if (worker?.mode === "process") return worker.pid;
+		return this.#lastProcessPid;
+	}
+
 	get present(): boolean {
 		return this.#worker !== null;
 	}
@@ -39,18 +49,23 @@ export class WorkerSlot {
 		return this.#startupAbort !== null;
 	}
 
-	postMessage(message: HostToKernelMessage): void {
-		this.#worker?.postMessage(message);
+	get generation(): number {
+		return this.#generation;
+	}
+
+	postMessage(message: HostToKernelMessage, transfer?: readonly MessagePort[]): void {
+		this.#worker?.postMessage(message, transfer);
 	}
 
 	async ensureReady(): Promise<void> {
 		if (!this.#ready) {
-			const generation = ++this.#generation;
+			const generation = this.#generation === 0 ? ++this.#generation : this.#generation;
 			const controller = new AbortController();
 			this.#startupAbort = controller;
 			const ready = startWorkerWithInlineFallback(
 				{
 					options: this.#options,
+					kernelGeneration: generation,
 					publish: (worker) => this.#publish(worker, generation),
 					isCurrent: (worker) => this.#isCurrent(worker, generation),
 					retire: (worker) => {
@@ -84,16 +99,25 @@ export class WorkerSlot {
 		this.#startupAbort = null;
 		this.#ready = null;
 		const worker = this.#worker;
+		const webViews = this.#webViews;
 		this.#worker = null;
-		if (!worker) return "terminated";
-		return await retireWorker(worker);
+		this.#webViews = null;
+		const retirement = worker
+			? await retireWorker(worker, this.#options.interruptBounds?.terminateDeadlineMs)
+			: "terminated";
+		await webViews?.release();
+		return retirement;
 	}
 
 	#publish(worker: WorkerLike, generation: number): void {
 		if (!this.#listeners.isOpen() || generation !== this.#generation) throw new WorkerStartupCancelledError();
 		this.#worker = worker;
+		if (worker.mode === "process") this.#lastProcessPid = worker.pid;
+		const webViews = new KernelWebViewClients((message, transfer) => worker.postMessage(message, transfer));
+		this.#webViews = webViews;
 		worker.onMessage((message) => {
-			if (this.#isCurrent(worker, generation)) this.#listeners.onMessage(message);
+			if (!this.#isCurrent(worker, generation) || webViews.consume(message)) return;
+			this.#listeners.onMessage(message);
 		});
 		worker.onError((error) => {
 			if (this.#isCurrent(worker, generation)) this.#listeners.onCrash(error);

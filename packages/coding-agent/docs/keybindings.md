@@ -130,6 +130,16 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows and WSL) | Paste image or text from clipboard |
 | `app.history.search` | `ctrl+r` | Search prompt history across sessions |
 
+Direct local Warp-on-WSL sessions accept both `ctrl+v` and `alt+v` for clipboard paste. Other Windows/WSL terminals keep `alt+v`; SSH and multiplexer sessions do not enable the Warp-specific default. Explicit user bindings replace the shortcut defaults, but do not disable terminal-native bracketed-paste events.
+
+When Warp sends an empty bracketed-paste event for a Windows clipboard image, the direct Warp-on-WSL composer reads the system clipboard through the same image/text paste handler. Non-empty bracketed text pastes and other terminal sessions keep their existing behavior.
+
+This compatibility handling is limited to direct Warp-on-WSL sessions. It does not add Ctrl+V image paste support to Windows Terminal, native Windows, other WSL terminals, SSH, or multiplexers.
+
+User-verified image attachment after Ctrl+V in Warp on WSL:
+
+![Warp-on-WSL composer with an attached clipboard image](images/warp-wsl-clipboard-paste.png)
+
 ### Sessions
 
 | Keybinding id | Default | Description |
@@ -138,6 +148,7 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.session.tree` | *(none)* | Open session tree navigator (`/tree`) |
 | `app.session.fork` | *(none)* | Fork current session (`/fork`) |
 | `app.session.resume` | *(none)* | Open session resume picker (`/resume`) |
+| `app.session.renameCurrent` | *(none)* | Rename the current session |
 | `app.session.togglePath` | `ctrl+p` | Toggle path display |
 | `app.session.toggleSort` | `ctrl+s` | Toggle sort mode |
 | `app.session.toggleNamedFilter` | `ctrl+n` | Toggle named-only filter |
@@ -152,7 +163,7 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.model.select` | `ctrl+l` | Open model selector |
 | `app.model.cycleForward` | `ctrl+p` | Cycle to next model |
 | `app.model.cycleBackward` | `shift+ctrl+p` (`alt+p` on Windows and WSL) | Cycle to previous model |
-| `app.models.save` | `ctrl+s` | Save the selected default model or scoped model configuration to settings |
+| `app.models.save` | `ctrl+s` | In the model picker, select the highlighted model and make it the default for new sessions; in the scoped models selector, save the configuration |
 | `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
 | `app.thinking.save` | `ctrl+s` | Save current thinking level to settings |
 | `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
@@ -164,8 +175,13 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
 | `app.message.copy` | `ctrl+x` | Copy the selected message in `/tree`; otherwise copy the last assistant message, or the active fullscreen text selection when `fullscreenCopyOnSelect` is disabled |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
-| `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
-| `app.question.answer` | `alt+a` | Open the pending async question (Enter on an empty editor and `/answer` do the same without a chord; on macOS the Option-composed glyph of the bound letter is accepted too, except for the dead keys e, i, n, u) |
+| `app.message.dequeue` | `alt+up` (`alt+q` on Windows and WSL) | Restore queued messages to editor when no pending question claims the chord |
+| `app.question.answer` | `alt+up`, `alt+a` | Open the pending async question before dequeue. Enter on an empty editor also opens it; `/answer` lists multiple requests. On macOS, the Option-composed glyph of a bound letter is also accepted (except dead keys e, i, n, u). |
+| `app.question.next` | `alt+down` | Cycle pending requests while the composer is empty and no overlay or autocomplete is open |
+
+The question hint prefers `alt+up` (`option+up` on macOS). In tmux, Apple Terminal, Warp, and VS Code it shows the retained `alt+a` alternative. Both bindings remain active; there is no third fallback chord. On Windows and WSL, dequeue uses `alt+q`, so `alt+up` does not conflict with it. Tab completion and Shift+Tab thinking-level cycling are unchanged.
+
+Pending-question option buttons also accept a single unmodified left click. A single-question choice answers immediately; the keyboard alternatives remain empty Enter, digits, the question chords, and `/answer skip`. While mouse capture is active, use your terminal's selection bypass (usually Shift-drag; Option-drag in iTerm2/Terminal.app). `terminal.mouse: "off"` disables capture without changing these bindings. See [Mouse Input](tui.md#mouse-input) for tmux and herdr limitations.
 
 ### Tree Navigation
 

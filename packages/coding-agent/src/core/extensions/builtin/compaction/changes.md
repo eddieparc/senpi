@@ -1,3 +1,342 @@
+## 2026-10-07 - Compaction context hook declares non-mutation (senpi#2525)
+
+### What changed
+
+- `index.ts`: the `context` handler is registered `{ mutatesMessages: false }`. The pipeline only derives or replaces messages, never mutates them in place — audited through `admitContextToolResults`, `reduceContextMessages`, `hardLimitEmergencyPrune`, `injectTokenBudgetReminder`, `markOpenAiRemoteReplayBoundary`, `repairOrphanedToolResults` and `convertToLlm`.
+- `orchestration.ts`, `context-reduction.ts`, `emergency-prune.ts`: every `{ ...message }` derivation routes through `inheritSessionContextEntryId`, so entry identity survives derivation without writing to the transcript objects.
+- `overflow-retry.ts`: `estimateWireTokens` memoizes per message object behind the same JSON-text key as `estimateTokens`, and reuses that serialization for its CJK scan, so a miss costs no extra `JSON.stringify` and an unchanged message skips the scan.
+
+### Why
+
+senpi#2525: on a 10k-message uncompacted transcript the per-turn clone plus re-estimation dominated turn preparation; the declaration lets the runner share the transcript, and the caches make estimation proportional to what changed.
+
+### Why an extension could not handle it
+
+This is the extension; the declaration and the identity propagation only take effect because the host runner honors them (see `src/core/extensions/changes.md`).
+
+### Expected merge conflict zones
+
+- `index.ts`: the `pi.on("context")` registration.
+- The derivation lines in `orchestration.ts`, `context-reduction.ts` and `emergency-prune.ts`.
+
+## 2026-10-05 - Attribute shared compaction logs to a session (senpi#2778)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/log.ts`: logger options accept a session identity reader, evaluated when each event is emitted; `sessionId` is allowlisted.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: the builtin supplies the current session identity.
+
+### Why
+
+- Several sessions share the agent-directory log and can reuse the same generation number. A nearby stale event without session identity cannot be attributed to the affected session.
+
+### Why an extension could not handle it
+
+- The compaction builtin owns the logger and its privacy allowlist.
+
+### Expected merge conflict zones
+
+- `log.ts`: logger options and allowed fields; `index.ts`: lazy logger construction.
+
+## 2026-10-04 - senpi owns compaction on the anthropic-subscription lane by default
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/lane-policy.ts`: `isSdkNativeCompactionLane` is true only for an explicit `compactionOwner: "sdk"` (resolved from `anthropicSubscriptionProvider.compactionOwner` / `SENPI_CLAUDE_SDK_OAUTH_COMPACTION_OWNER` through `resolveCompactionOwner`, unset means `"senpi"`). By default `disablesSenpiCompaction` is false on the resident lane, so the speculative, idle, threshold, overflow, hard-limit, degradation and restoration routes run there as on every other provider (the per-turn context reduction stays off, see the append-only entry below). `"sdk"` keeps the SDK-native stand-down exactly as before.
+- `lane-policy.ts`: the per-cwd settings cache is removed. `resumeMode` and the owner are read on every call (the loader is already cached by settings-file revision), the same live value the query options read for the next turn, so a mid-session owner change can never leave senpi and the resident process disagreeing about who compacts.
+- Tests: `test/suite/regressions/2746-anthropic-subscription-single-compaction-owner.test.ts` drives a real session against the scripted SDK: the default turn's resident process carries `autoCompactEnabled: false` and the token-reminder overlay, both owner flips restart the resident process with the new setting, a failed senpi overflow compaction ends the turn with its error and no native compaction, and a native `compact_boundary` under senpi stops the turn. `test/compaction/lane-policy.test.ts` pins the new default and the live read; the SDK-owned alignment and #7975 cases now set `"sdk"` explicitly.
+
+### Why
+
+- Maintainer decision on #2749 (senpi#2746): senpi owns the lane by default. On the resident lane the context otherwise grows to the SDK's native trigger (~967k of a 1M window, observed in real sessions) with every senpi compaction feature off. Since senpi#2440 an accepted compaction always cold-seeds the compacted branch, and the SDK's native auto-compact is pinned off for a senpi-owned session (see `anthropic-subscription/changes.md`, same date), so exactly one side compacts.
+
+### Why an extension could not handle it
+
+- Lane ownership is this builtin's own policy.
+
+### Expected merge conflict zones
+
+- LOW: `isSdkNativeCompactionLane`, `SdkNativeLaneInput` and `createCompactionLanePolicy` in `lane-policy.ts`.
+
+## 2026-10-04 - The resident anthropic-subscription transcript stays append-only
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/lane-policy.ts`: new `hasAppendOnlyTranscript` on the lane policy, true on the resident `anthropic-subscription` lane (`resumeMode` not `off`) whoever owns compaction. The per-cwd `resumeMode` read moved into a shared `resolveResumeMode` with the same fail-closed behavior.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/context-pipeline.ts` + `index.ts`: the `context` handler passes it to `buildCompactionContext`, which then skips the no-LLM context reduction on that lane, including the tripped circuit breaker's deterministic fallback (the same per-turn rewrite). Tool-result admission (a fixed per-result cap, so a sent result never changes), the latched hard-limit emergency prune and every compaction route are unchanged.
+- Tests: `test/compaction/lane-policy.test.ts` (the predicate), `test/compaction/external-owner-breaker-isolation.test.ts` (a tripped breaker leaves an append-only transcript untouched), and `test/anthropic-subscription-compaction-alignment.test.ts` (a `compaction.model` override on the lane leaves the context messages untouched while the same load reduces them for other providers, and the turn after usage crosses the reduction gate still continues as a `delta` instead of `sent_stream_diverged`).
+
+### Why
+
+- The resident SDK session only accepts appended messages. With the documented `compaction.model` escape hatch senpi owns compaction on the lane, so the context reduction ran there: past its 50% gate it rewrites older messages, the sent stream diverges from the SDK transcript (`sent_stream_diverged`) and every later turn re-sends the history through a fork or a cold-seed instead of a delta. Measured on the real lane (claude-haiku-4-5, 120k window, senpi-owned): from the first rewrite on, cache reads dropped to the ~20k system prompt with 13-43k cache writes per turn; with the reduction skipped every turn stayed `delta / prefix_matched` and cache reads grew turn by turn.
+
+### Why an extension could not handle it
+
+- The context pipeline and lane policy are this builtin's own policy.
+
+### Expected merge conflict zones
+
+- LOW: `hasAppendOnlyTranscript` / `resolveResumeMode` in `lane-policy.ts`; the reduction gate in `context-pipeline.ts`; the `context` handler arguments in `index.ts`.
+
+## 2026-10-01 - Remote compaction budget scales with the context size, and timeouts are reported (senpi#2434)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote-timeout.ts`: `openAiRemoteCompactionTimeoutMs(model, compactionTokens)` replaces the flat per-lane budget with a per-attempt budget of `min(15 min, max(lane floor, 2 ms x tokens))`. The floors stay 90 s for the subscription lane and 15 s for `openai-responses` lanes, so small compactions keep their short budget. `createRemoteCompactionDeadline` gives every remote attempt of one compaction a shared 15-minute deadline: each attempt gets its own budget clamped to what is left, so a lane that falls through v2, WebSocket and the compact endpoint never waits more than 15 minutes in total before the local summary (which keeps its own budget, as before). `runWithRemoteTimeout` reports the measured wait, and `formatRemoteCompactionTimeoutNotice` words a timeout: the wait, the token count, and the next step.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote.ts`: the budget is sized from the request's `tokensBefore`, and each `remote-compaction-timeout` fallback event carries a `timeout` record (`waitedMs`, `tokens`, `next`: `websocket`, `compact-endpoint` or `local-summary`; `local-summary` whenever the shared deadline is spent). A route that would start after the deadline is skipped with a `remote-compaction-budget-exhausted` fallback event.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote-responses-v2.ts`: the v2 attempt takes a `describeTimeout` callback and reports its measured wait and next step in the same record.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/extension-wiring.ts` + `index.ts`: `reportRemoteCompactionTimeout` turns that record into a TUI warning and a `compaction_progress` text update on both the core route and the blocking route. Which fallback runs is unchanged.
+- Thanks @rhyme227 for the measurements in the report.
+
+### Why
+
+- The subscription lane's flat 90 s covered about 85k tokens at the measured ~1.06 ms/token, while compaction fires near 280k on a 400k window: a real 383k-token compaction took 257 s, so the remote path timed out exactly when it was needed and every large session paid 90 s before the local summary even started.
+- A timeout was visible only in a debug event; the user saw a slow compaction and a local summary with no reason.
+
+### Why an extension could not handle it
+
+- The remote compaction budget and its user feedback are this builtin's own policy.
+
+### Expected merge conflict zones
+
+- LOW: `openAiRemoteCompactionTimeoutMs` and the notice formatter in `openai-remote-timeout.ts`; the timeout fallback events in `openai-remote.ts` and `openai-remote-responses-v2.ts`; `reportRemoteCompactionTimeout` and its imports in `extension-wiring.ts`; the two remote emit callbacks in `index.ts`.
+
+## 2026-09-30 - Compaction accepts ambient request-time authentication (senpi#2441)
+
+### What changed
+
+- `speculative.ts`: the summary-auth pre-check accepts the model registry's preserved `ambient` marker in addition to API keys and credential headers.
+- `test/suite/regressions/2441-bedrock-ambient-compaction.test.ts`: an Amazon Bedrock model authenticated only by an `AWS_PROFILE` reaches the mocked Bedrock summary request through `runExtensionCompaction`; an unconfigured keyed provider remains rejected before dispatch.
+
+### Why
+
+- Amazon Bedrock and Google Vertex resolve shared cloud credential chains as ambient auth with an empty request-auth object because their SDKs authenticate at request time. Compaction discarded that provider decision and rejected the request before the normal model runtime could apply it.
+
+### Why an extension could not handle it
+
+- The rejection happens inside the builtin compaction summary generator before any provider request is sent.
+
+### Expected merge conflict zones
+
+- LOW: the auth guard near the start of `runExtensionCompaction()` in `packages/coding-agent/src/core/extensions/builtin/compaction/speculative.ts`.
+
+## 2026-09-30 - Recover stalled pre-prompt compaction across unsafe split turns (senpi#1735)
+
+### What changed
+
+- `pre_prompt` compaction now enters deterministic failure recovery only when
+  known usage has reached the effective hard cap. A failed proactive
+  below-cap attempt remains fail-closed and preserves the full context.
+- When every prepared or earlier boundary retains unsafe split-turn content,
+  deterministic recovery now scans forward and selects the earliest suffix that
+  already passes the existing replay-safety, atomic tool-chain, and effective
+  token-budget checks.
+
+### Why
+
+- A resumed session at its hard cap could stall during provider summarization,
+  reject compaction, and then fail admission without attempting the
+  deterministic fallback. Below the cap, provider admission remains possible,
+  so destructive recovery would lose context without a liveness benefit.
+- Long split turns can contain an unsafe historical tool result with no later
+  user boundary. Scanning only prepared, user, and earlier boundaries retains
+  that unsafe result forever even when a later assistant boundary is safe.
+
+### Why an extension could not handle it
+
+- Required-compaction recovery and the retained-suffix candidate order are this
+  builtin's own policy.
+
+### Expected merge conflict zones
+
+- `extension-wiring.ts`: required fallback reason classification.
+- `deterministic-fallback.ts`: retained-suffix candidate ordering.
+
+## 2026-09-29 - ChatGPT subscription remote compaction goes through responses-v2 and replays on its own lane (senpi#2378)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote.ts`: `runOpenAiRemoteCompaction` routes the `chatgpt-subscription` / `openai-codex-responses` lane through responses-v2 and returns after that one attempt, so the lane never calls the retired `/codex/responses/compact` route and never falls through to a second remote request. The v2 checkpoint's replay origin is the same canonical origin later turns present: the request-local `x-codex-beta-features: remote_compaction_v2` header is no longer part of the tenant fingerprint, which made the replay hook refuse every v2 checkpoint (on the `openai` lane too). The remote timeout is chosen per lane.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote-responses-v2.ts`: `supportsOpenAiResponsesRemoteCompactionV2` is true for the subscription lane; the v2 run accepts either lane's model, records the lane's own identity (`openAiRemoteCompactionIdentity`) instead of a hard-coded `openai-responses`, and sends the subscription lane's request with `maxRetries: 0` through the provider-turn transport (the model runtime), so it uses the same auth, env and proxy handling as a normal turn.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote-timeout.ts`: `openAiRemoteCompactionTimeoutMs(model)` keeps 15 s for `openai-responses` and gives the subscription lane `CHATGPT_SUBSCRIPTION_REMOTE_COMPACTION_TIMEOUT_MS` = 90 s. A live subscription-lane v2 compaction on this branch measured 17,740 ms at 16,735 context tokens; 90 s is about a 5x margin over that, leaving headroom for larger contexts (the lane's window is 400k) and slower links, while a timeout still falls back to the local summary.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote-dependencies.ts`: `OpenAiResponsesStreamRunner` accepts either remote-compaction model.
+
+### Why
+
+- The ChatGPT backend no longer serves `/codex/responses/compact` (404), so every compaction on this lane fell back to the local summary after one or two failed requests. The backend serves responses-v2 (`input` plus `{"type":"compaction_trigger"}` with `x-codex-beta-features: remote_compaction_v2`).
+- A real v2 compaction on this lane takes longer than 15 s (17.7 s measured live at 16.7k tokens).
+- A v2 checkpoint stored `api: "openai-responses"` and a fingerprint including the v2 beta header, so the next turn's replay check refused it and the model saw only the placeholder summary.
+- A failed or timed-out attempt stores nothing and the compaction takes the local summary; a later refusal after an account or model switch is tracked in senpi#2382.
+
+### Why an extension could not handle it
+
+- Remote compaction routing, checkpoint provenance and replay are this builtin's own policy.
+
+### Expected merge conflict zones
+
+- LOW: the responses-v2 branch of `runOpenAiRemoteCompaction` in `openai-remote.ts`; `runOpenAiResponsesV2Compaction` options and details in `openai-remote-responses-v2.ts`; the timeout constants in `openai-remote-timeout.ts`.
+
+## 2026-09-29 - senpi owns the overflow of a failed cold-seed on the anthropic-subscription lane (senpi#2329)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/lane-policy.ts`: `ownsCompaction(context, "overflow")` returns true on the SDK-native lane when the newest assistant on the branch since the latest compaction carries the `claude_sdk_oauth_cold_seed_overflow` marker. `LaneContext` gains an optional `sessionManager` branch reader (the real `ExtensionContext` already provides it). Threshold, pre-prompt and every unmarked overflow stay SDK-owned.
+
+### Why
+
+- A cold-seed re-sends senpi's own, never-compacted history as one message the SDK cannot compact, so only senpi can recover its overflow; rejecting it as `external-owner` killed the session (oh-my-openagent#7975).
+
+### Why an extension could not handle it
+
+- Ownership is this builtin's own policy.
+
+### Expected merge conflict zones
+
+- LOW: `ownsCompaction` and the `LaneContext` interface in `lane-policy.ts`.
+
+## 2026-09-25 - Todo snapshots carry the captured ask (senpi#2121)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/todo-bridge.ts`: `createTodoSnapshot` records the latest todo state's `ask`, `findLatestTodoSnapshot` keeps a valid snapshot `ask`, and the `compaction.todo-restore-request` message details therefore re-emit it. The restore message type comes from `todotools/state.ts` (`TODO_RESTORE_REQUEST_TYPE`).
+
+### Why
+
+The todo tool anchors a rebuilt list to the ask in the restore request, so a list restored after compaction keeps the user's original request instead of the newest message.
+
+### Why an extension could not handle it
+
+Snapshot capture and restore are private to this builtin.
+
+### Expected merge conflict zones
+
+- LOW: `todo-bridge.ts` snapshot shape and restore parsing.
+
+## 2026-09-22 - claude-sdk-oauth provider id renamed to anthropic-subscription in compaction comments (senpi#1989)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/lane-policy.ts`: doc comment names the `anthropic-subscription` main lane. The lane-detection comparisons already route through `ANTHROPIC_SUBSCRIPTION_PROVIDER_ID` and follow the constant's new value; the frozen tokens in this file (`claude-sdk-oauth-compact` entry type, `claude_sdk_oauth_compact_boundary` diagnostic, `senpi.claude-sdk-oauth.compact-boundary.v1` schema) are untouched.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative-summary.ts`: comment names the provider by its new id.
+
+### Why
+
+Comment accuracy after the provider-id rename; no behavior change in this directory.
+
+### Why an extension could not handle it
+
+Comments inside this builtin; nothing for an extension to override.
+
+### Expected merge conflict zones
+
+- `lane-policy.ts` header comment, against lane-policy edits.
+
+## 2026-09-22 - chatgpt-subscription provider id in the compaction lane (senpi#1989)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote.ts` and `packages/coding-agent/src/core/extensions/builtin/compaction/openai-remote-model.ts`: the remote-compaction provider checks use the new id.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative-summary.ts`: the same provider check on the speculative path.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative.ts`: the speculative-compaction provider gate uses the new id.
+
+### Why
+
+The OpenAI subscription provider id was renamed from `openai-codex` to `chatgpt-subscription` (senpi#1989): the old id named a CLI rather than the thing a user signs in with. These modules resolve or display that provider id at runtime, so they move with it. The wire api id `openai-codex-responses` is deliberately NOT renamed - it names the dialect, not the provider - and neither are file names or module paths.
+
+### Why an extension could not handle it
+
+The provider id is resolved inside the package before any extension loads, and these call sites compare or render it while building requests and UI. An extension cannot rewrite an id the package has already used.
+
+### Expected merge conflict zones
+
+- These three files, against any other change to the remote-compaction provider gate.
+
+## Hold a model switch until the next send can compact for it (2026-09-20)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/switch-admission.ts` (new): `PendingModelSwitch` plus `createPendingModelSwitch`, the switch-side counterpart to `resume-admission.ts`, and `pendingSwitchKeepRecentTokens`, which recovers the keep-recent size the *pending* model's window is designed around from that model's own projection (`postCompactionRequiredTokens` minus the fixed overhead).
+- The geometry and the summarizer deliberately come from different models: the reduction targets the window the transcript must end up inside, while the summary request is still issued by the model that can hold the transcript today. Aiming at the current model's geometry leaves a result the target still cannot hold; aiming at whatever merely fits leaves no room for the summary the compaction is about to add.
+
+### Why
+
+- The session-side half of #1873 needs a reduction target that belongs to a model which is not the active one. Every existing geometry helper resolves against the active model, so the pending switch had no way to express "compact as if you were already on the target".
+
+### Why an extension could not handle it
+
+- The value is consumed inside `_executeCompaction`'s settings resolution, which no hook can reach, and it is derived from an admission projection that is private to this extension.
+
+### Expected merge conflict zones
+
+- LOW: new file; only its import in `agent-session.ts` can conflict.
+- Coverage: `test/suite/regressions/1873-deferred-model-switch.test.ts`.
+
+## Project a three-tier admission verdict instead of one usable boolean (2026-09-20)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/model-usability-budget.ts`: the projection now carries `verdict` (`fits-now` / `fits-after-compaction` / `impossible`) plus the two geometries it is derived from, `postCompactionRequiredTokens` (fixed overhead plus the keep-recent floor) and `compactionRequiredTokens` (live context plus the overhead a summarization request itself must carry). Both were already computed inside the resume relaxation branch; they are now computed for every admission and returned, so a caller can tell "needs a smaller transcript" from "this model can never serve this session" without re-deriving the arithmetic.
+- `usable`, `requiredTokens`, and `shortfallTokens` keep their meaning exactly: the relaxation that flips `usable` is still scoped to `admission === "resume"` with the lead excluded and compaction enabled. `verdict` is a capability statement and deliberately does not consult `compaction.enabled`, because whether a session may reduce its transcript (and whether it summarizes or slices) is the caller's policy - the split `sdk.ts` already makes on resume.
+
+### Why
+
+- A switch onto a model that one compaction would make usable is refused outright today, and a Ctrl+P cycle skips it silently (#1378), so the model the user picked is simply not applied. Resume already repairs this case; switch and fallback cannot reach that machinery because it is keyed on the resume admission. Repairing them needs a signal that separates a repairable shortfall from an overhead-bound model, which is what `verdict` provides. This is the first of three stacked changes for #1873; the consumers land next.
+
+### Why an extension could not handle it
+
+- The admission projection is private to the builtin compaction extension and runs inside `AgentSession`'s switch and resume guards. No public hook observes a refused model switch or can contribute a budget verdict to it.
+
+### Expected merge conflict zones
+
+- LOW: `model-usability-budget.ts` around the projection interface and the resume relaxation branch, which was rewritten to reuse the hoisted geometries rather than recompute them.
+- Coverage: `test/suite/model-usability-budget.test.ts` (`classifies admission as fits-now, fits-after-compaction, or impossible`).
+
+## Retry compaction summarization without the reasoning override after an empty stop (2026-09-17)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative.ts`: an empty summary with `stopReason: "stop"` spends one retry of the same request with `omitReasoningOptions: true` before the terminal `empty-summary` throw, gated on `hasSummarizationReasoningOverride(model)` the way the bare-tool-call retry is gated on `summarizationToolsOffered`. A model whose first attempt carried no override (non-reasoning, or an api family `summarizationReasoningOptions` leaves alone) keeps the single-call terminal contract.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative-summary.ts`: `generateSummaryMessage` accepts `omitReasoningOptions` and skips `summarizationReasoningOptions` when it is set; new `hasSummarizationReasoningOverride(model)` reports whether that override is non-empty. On `anthropic-messages` the override is `thinkingEnabled: false`, so the retry there runs with the provider's default thinking, clamped by the compaction deadline.
+
+### Why
+
+- Incident 2026-09-17: `z-ai/glm-5.3-flash` behind a custom cline-backed OpenAI-completions relay returned HTTP 200 SSE streams carrying only the role prelude (completion=7 tokens, reasoning=0) on large tool-bearing summarization prompts, repeatedly, while the same model answered ordinary agent traffic (no effort pin). The relay records 200/success, so each empty answer threw `SummaryGenerationError("empty-summary")` at the first response: it never reaches the overflow shrink branch (`isContextOverflow` is false for an empty 200) and `isRetryableSummaryAttempt` rejects `SummaryGenerationError`. The repeats came from every route that re-triggers compaction (`pre_prompt` before each turn, the idle warm-up plus `MAX_IDLE_WARMUP_RETRIES`, the breaker reopening after `COOLDOWN_MS`), each paying one full summarization request; on non-required reasons (`isRequiredCompactionFallbackReason` covers manual/threshold/overflow only) the deterministic checkpoint does not apply, which is where "Compaction rejected: summarization response contained no text (stopReason: stop)" came from. Dropping the reasoning override is the one request-level lever the summarizer owns, and it is only a lever when the first request carried one; persistent emptiness still falls through to the deterministic fallback.
+
+### Why an extension could not handle it
+
+- The retry loop, the summarizer request options, and the empty-summary classification are private state of the builtin compaction extension; no public hook observes an empty stop response or rewrites the summarizer request between attempts.
+
+### Expected merge conflict zones
+
+- LOW: `speculative.ts` around the empty-summary branch in the summarization retry loop and the `reasoningOverrideOffered` flag.
+- LOW: `speculative-summary.ts` around the summarizationStream options spread and `hasSummarizationReasoningOverride`.
+- Coverage: `test/compaction/summarization-empty-stop-retry.test.ts` (faux provider: override retry, persistent emptiness, non-reasoning single call, Anthropic `thinkingEnabled`, bare-tool-call then empty-stop interaction) and `test/compaction/summarization-empty-stop-retry-wire.test.ts` (real openai-completions adapter over local HTTP: `reasoning_effort` present on attempt 1, absent on attempt 2).
+
+## Authorize the deterministic fallback for a provider-killed summary stream (2026-09-16)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts`: `RequiredCompactionFallbackFailure` gains `summarization-provider-failure`, and `classifyRequiredCompactionFallbackFailure` now recognizes a summary stream terminated by a provider or credential fault - any `CredentialFailoverError`, any error whose message carries the `senpi:no-turn-retry:` marker, and a non-transient, non-refused `SummaryRequestError` with no structured failure kind - plus `SummarizationTotalBudgetError` as `summarization-timeout`. User aborts, policy refusals, missing credentials and ordinary bugs stay unauthorized. Adds `stripTurnRetrySuppressionPrefix()` and `formatRequiredCompactionFallbackNotice()`.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative.ts`: `SummaryRequestError` carries an explicit `refused` flag (set from `refusal`/`sensitive` stop details); `isRetryableSummaryAttempt` mirrors the new class so a marker-bearing or credential-failover error is never re-billed while genuinely transient failures still retry; `runExtensionCompaction` opens one `createSummarizationDeadline` for the whole compaction, re-clamps every attempt budget to what is left, and refuses a retry once the deadline passed.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/speculative-summary.ts`: `generateSummaryMessage` returns the message settled inside `consumeStreamWithIdleTimeout` instead of awaiting `responseStream.result()` after the watchdog cleared its timers.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/transient-failure.ts`: a compaction-wide total-budget trip degrades like the other watchdog trips.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: `recoverRequiredCompaction` takes the context and the causing error, notifies the user once through `ctx.ui.notify` when the deterministic checkpoint is applied, and every compaction message built from an error message is stripped of the `senpi:no-turn-retry:` prefix.
+
+### Why
+
+- Issue #1741: a summarization stream killed by a credential-rotation or provider error classified as `undefined`, so the deterministic fallback that exists precisely for "summarization did not complete" never ran. The blocking route rethrew, the marker disabled both session retry and model fallback, the context stayed above the threshold, and the next prompt repeated the identical failure forever; the circuit breaker never debited because the failure was non-transient.
+- The marker is a session-internal replay-suppression signal. It must stay on the error object the session predicates read, and never appear in what the user is shown.
+
+### Why an extension could not handle it
+
+- The classification is this builtin's private authorization contract for destructive context reduction, and the retry predicate lives inside its own summarization loop; no external extension can observe a summary attempt's provenance or participate in required-compaction admission.
+
+### Expected merge conflict zones
+
+- LOW: `deterministic-fallback.ts` failure-kind union and classifier.
+- LOW: `speculative.ts` `SummaryRequestError` shape, `isRetryableSummaryAttempt`, and the summarization while-loop.
+- LOW: `speculative-summary.ts` stream settlement, `transient-failure.ts` predicate, `index.ts` `recoverRequiredCompaction` call sites.
+
 # changes.md — builtin compaction policy
 
 ## Deterministic resume slice for an over-window restored context (2026-09-10)
@@ -1109,8 +1448,8 @@ These are corrections to the lane-policy gate itself, not new behavior an extens
 ### Scope
 
 - Senpi compaction remains FULLY active for every non-`claude-sdk-oauth` provider; that is pinned by the
-  characterization block in `test/claude-sdk-oauth-compaction-alignment.test.ts`.
-- Coverage: `test/compaction/lane-policy.test.ts`, `test/claude-sdk-oauth-compaction-alignment.test.ts`,
+  characterization block in `test/anthropic-subscription-compaction-alignment.test.ts`.
+- Coverage: `test/compaction/lane-policy.test.ts`, `test/anthropic-subscription-compaction-alignment.test.ts`,
   `test/compaction-checkpoint-oneshot.test.ts`, `test/compaction/checkpoint-directive-characterization.test.ts`.
 
 ### Expected merge conflict zones
@@ -1780,3 +2119,49 @@ untouched. Expected upstream conflict zones: `builtin/compaction/speculative.ts`
 ### Expected merge conflict zones
 
 - LOW: `lane-policy.ts` `LaneContext` and `disablesSenpiCompaction()` provider-scoping logic.
+## 2026-10-10 - Recover unsafe newest entries without retrying identical rejections (senpi#3060)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts`: fallback checkpoints select a replay policy that repairs unsafe messages before candidate sizing and pairing checks; rejection diagnostics describe RPC-capable recovery rather than requiring a new session.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/retained-message-projection.ts`: normalize through the session writer's `transformJson` before bounded replay classification. Unsafe results retain their call ID as error placeholders. Unsafe signed assistants and their associated results are omitted together; readable user text survives malformed attachments. Active incomplete, duplicate, reversed and orphaned tool chains still fail structural admission.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/rejected-recovery.ts`: persisted retained-context fingerprint plus reason/entry records stop repeated impossible recovery until context, model or compaction settings change. Summarized history, mirror-reconnected parent IDs and bookkeeping entries do not release the latch on reopen.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: record failed recovery and gate blocking/speculative automatic routes on that durable state.
+
+### Why
+
+The cumulative unsafe suffix check rejected all 246 candidates when the newest eval result was unsafe. Live non-plain details could also fail bounded classification although their persisted JSON was safe. Time-based circuit breakers could not stop identical retries permanently.
+
+### Why an extension could not handle it
+
+This is the owning builtin. The projection must also be applied by the session manager, and core automatic admission must check the latch before opening another attempt.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts`: recovery details, sizing and diagnostics.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: recovery helper and blocking/speculative admission.
+- `retained-message-projection.ts` and `rejected-recovery.ts` are new fork-owned helpers.
+
+## 2026-10-10 - Distinguish terminal retained-context rejection from summarizer failure (senpi#3061)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: only a successful provider summary that core admission would reject, followed by a failed zero-summary suffix viability probe, produces a typed terminal rejection. A failed summarizer may still use deterministic recovery, but a rejected recovery from that path never writes the durable latch.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts`: add `UnsafeRetainedSuffixError`, carry its diagnostics separately from provider failure kinds, and support a zero-summary viability probe. Only latched terminal diagnostics claim automatic compaction is paused.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/rejected-recovery.ts`: read only records carrying the deterministic `unsafe-retained-content` failure kind. Older untyped records and unrelated failure kinds cannot suppress a recovered provider or overwrite a valid context latch. Core and the extension share the existing projected-overflow calculation, including Cursor admission, so a conservative fallback estimate cannot overrule a usable generated summary.
+
+### Why
+
+- A rejected emergency checkpoint after a failed provider request does not establish that the next provider summary would fail: a short successful summary may fit where the recovery marker does not. Network, timeout, abort, rate-limit, empty-summary and other summarizer errors retain their existing retry/backoff behavior.
+- The deterministic terminal decision is made only after successful summary generation fails the exact core admission calculation and tests suffix viability without summary text or previous-checkpoint overhead. Structural, pairing and retained-token failures are terminal; missing boundaries and reconstruction errors are not promoted to a durable context fault.
+- Explicit manual retry remains allowed. A provider failure during that retry neither clears the earlier deterministic context finding nor writes a replacement; a changed context/model/budget still releases it.
+
+### Why an extension could not handle it
+
+- This is the owning builtin. Core delegates its existing projected-overflow calculation to the shared helper; there is no public extension API change.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: local summary generation and recovery decision points.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts`: failure-kind classifier, candidate summary construction and diagnostic formatting.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/rejected-recovery.ts`: persisted rejection selection.

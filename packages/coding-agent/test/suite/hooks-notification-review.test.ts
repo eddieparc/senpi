@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEventBus } from "../../src/core/event-bus.ts";
-import { ASK_USER_SETTLED_EVENT, emitAskUserNotification } from "../../src/core/extensions/builtin/ask-user/notify.ts";
+import {
+	ASK_USER_ASKED_EVENT,
+	ASK_USER_SETTLED_EVENT,
+	emitAskUserNotification,
+} from "../../src/core/extensions/builtin/ask-user/notify.ts";
 import type { QuestionResponse } from "../../src/core/extensions/builtin/ask-user/schema.ts";
 import * as commandRunner from "../../src/core/extensions/builtin/hooks/command-runner.ts";
 import {
@@ -20,13 +24,14 @@ import type {
 	HookInputWire,
 	HookTrustState,
 } from "../../src/core/extensions/builtin/hooks/types.ts";
-import type { ExtensionContext } from "../../src/core/extensions/types.ts";
+import type { ExtensionContext, ExtensionToolContext } from "../../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const roots: string[] = [];
 const harnesses: Harness[] = [];
+const inFlightNotifications = new Set<Promise<void>>();
 const args = {
 	questions: [{ header: "Library", question: "Which library?", multiSelect: false }],
 	waitForAnswer: true,
@@ -82,8 +87,9 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
 		if (timer !== undefined) clearTimeout(timer);
 	}
 }
-afterEach(() => {
+afterEach(async () => {
 	vi.useRealTimers();
+	await bounded(Promise.all([...inFlightNotifications]));
 	vi.restoreAllMocks();
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 	for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -97,7 +103,7 @@ async function fixture(activation: "active" | "disabled" | "excluded" = "active"
 	const scriptPath = join(dir, "record.mjs");
 	writeFileSync(
 		scriptPath,
-		`import { appendFileSync } from 'node:fs'; let data = ''; process.stdin.on('data', c => data += c); process.stdin.on('end', () => { appendFileSync(${JSON.stringify(stdinPath)}, JSON.stringify(JSON.parse(data)) + '\\n'); process.stdout.write(JSON.stringify({ additionalContext: JSON.parse(data).request_id })); });`,
+		`import { appendFileSync } from 'node:fs'; let data = ''; process.stdin.on('data', c => data += c); process.stdin.on('end', () => { const input = JSON.parse(data); if (input.kind === 'ask-user-asked') { process.stdout.write('{}'); return; } appendFileSync(${JSON.stringify(stdinPath)}, JSON.stringify(input) + '\\n'); process.stdout.write(JSON.stringify({ additionalContext: input.request_id })); });`,
 	);
 	const config = {
 		hooks: {
@@ -125,14 +131,23 @@ async function fixture(activation: "active" | "disabled" | "excluded" = "active"
 		disabledBuiltinExtensions: activation === "disabled" ? ["hooks"] : [],
 		askUser: { enabled: true },
 	};
+	// This fixture isolates settlement records; arrival commands are exercised separately.
+	const arrivalFinished = Promise.withResolvers<void>();
 	const notificationFinished = Promise.withResolvers<void>();
 	const bus = createEventBus();
 	const eventBus = {
 		emit: bus.emit,
 		on(channel: string, handler: (data: unknown) => void) {
 			return bus.on(channel, async (data) => {
-				await handler(data);
-				if (channel === ASK_USER_SETTLED_EVENT) notificationFinished.resolve();
+				const operation = Promise.resolve(handler(data));
+				inFlightNotifications.add(operation);
+				try {
+					await operation;
+					if (channel === ASK_USER_SETTLED_EVENT) notificationFinished.resolve();
+					if (channel === ASK_USER_ASKED_EVENT) arrivalFinished.resolve();
+				} finally {
+					inFlightNotifications.delete(operation);
+				}
 			});
 		},
 	};
@@ -187,6 +202,7 @@ async function fixture(activation: "active" | "disabled" | "excluded" = "active"
 		stdinPath,
 		hooksPath,
 		notificationFinished: notificationFinished.promise,
+		arrivalFinished: arrivalFinished.promise,
 		completed(id: string) {
 			const signal = Promise.withResolvers<void>();
 			signals.set(id, signal);
@@ -259,7 +275,9 @@ describe("Notification review regressions", () => {
 		async (activation) => {
 			const f = await fixture(activation);
 			const getSources = vi.spyOn(f.ctx, "getLoadedHookSources");
-			expect((await f.tool.execute("disabled", args, undefined, undefined, f.ctx)).details).toMatchObject({
+			expect(
+				(await f.tool.execute("disabled", args, undefined, undefined, f.ctx as ExtensionToolContext)).details,
+			).toMatchObject({
 				status: "answered",
 			});
 			expect(getSources).not.toHaveBeenCalled();
@@ -272,7 +290,13 @@ describe("Notification review regressions", () => {
 		async (waitForAnswer) => {
 			const f = await fixture();
 			const done = f.completed("answer");
-			const result = await f.tool.execute("answer", { ...args, waitForAnswer }, undefined, undefined, f.ctx);
+			const result = await f.tool.execute(
+				"answer",
+				{ ...args, waitForAnswer },
+				undefined,
+				undefined,
+				f.ctx as ExtensionToolContext,
+			);
 			expect(result.details).toMatchObject(
 				waitForAnswer ? { status: "answered" } : { status: "pending", requestId: "answer" },
 			);
@@ -301,7 +325,13 @@ describe("Notification review regressions", () => {
 			f.ctx.ui.question = vi.fn(() => ui.promise);
 			const done = f.completed("timeout");
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-			const execution = f.tool.execute("timeout", { ...args, waitForAnswer }, undefined, undefined, f.ctx);
+			const execution = f.tool.execute(
+				"timeout",
+				{ ...args, waitForAnswer },
+				undefined,
+				undefined,
+				f.ctx as ExtensionToolContext,
+			);
 			await vi.advanceTimersByTimeAsync(1800000);
 			const result = await execution;
 			ui.resolve(answer);
@@ -321,8 +351,15 @@ describe("Notification review regressions", () => {
 			const f = await fixture();
 			f.ctx.ui.question = async () => cancelled;
 			const getSources = vi.spyOn(f.ctx, "getLoadedHookSources");
-			await f.tool.execute("cancelled", { ...args, waitForAnswer }, undefined, undefined, f.ctx);
-			expect(getSources).not.toHaveBeenCalled();
+			await f.tool.execute(
+				"cancelled",
+				{ ...args, waitForAnswer },
+				undefined,
+				undefined,
+				f.ctx as ExtensionToolContext,
+			);
+			await bounded(f.arrivalFinished);
+			expect(getSources).toHaveBeenCalledOnce();
 			expect(f.payloads()).toEqual([]);
 			expect(f.records).toEqual([]);
 		},
@@ -334,8 +371,20 @@ describe("Notification review regressions", () => {
 		f.ctx.ui.question = (request) => (request.requestId === "first" ? first.promise : second.promise);
 		const firstDone = f.completed("first");
 		const secondDone = f.completed("second");
-		await f.tool.execute("first", { ...args, waitForAnswer: false }, undefined, undefined, f.ctx);
-		await f.tool.execute("second", { ...args, waitForAnswer: false }, undefined, undefined, f.ctx);
+		await f.tool.execute(
+			"first",
+			{ ...args, waitForAnswer: false },
+			undefined,
+			undefined,
+			f.ctx as ExtensionToolContext,
+		);
+		await f.tool.execute(
+			"second",
+			{ ...args, waitForAnswer: false },
+			undefined,
+			undefined,
+			f.ctx as ExtensionToolContext,
+		);
 		second.resolve(answer);
 		await bounded(secondDone);
 		first.resolve(timeout);
@@ -417,7 +466,9 @@ describe("Notification review regressions", () => {
 			});
 			const syncRead = vi.spyOn(FileHookStateStorage.prototype, "read");
 			const done = f.completed("gated");
-			const result = await bounded(f.tool.execute("gated", { ...args, waitForAnswer }, undefined, undefined, f.ctx));
+			const result = await bounded(
+				f.tool.execute("gated", { ...args, waitForAnswer }, undefined, undefined, f.ctx as ExtensionToolContext),
+			);
 			await bounded(entered.promise);
 			expect(result.details).toMatchObject({ status: waitForAnswer ? "answered" : "pending" });
 			expect(f.payloads()).toEqual([]);
@@ -441,7 +492,13 @@ describe("Notification review regressions", () => {
 		});
 		const done = f.completed("command-gated");
 		const result = await bounded(
-			f.tool.execute("command-gated", { ...args, waitForAnswer }, undefined, undefined, f.ctx),
+			f.tool.execute(
+				"command-gated",
+				{ ...args, waitForAnswer },
+				undefined,
+				undefined,
+				f.ctx as ExtensionToolContext,
+			),
 		);
 		await bounded(entered.promise);
 		expect(result.details).toMatchObject({ status: waitForAnswer ? "answered" : "pending" });
@@ -458,7 +515,7 @@ describe("Notification review regressions", () => {
 		mkdirSync(join(f.hooksPath, "..", "hooks-state.json.lock"));
 		const read = vi.spyOn(FileHookStateStorage.prototype, "read");
 		const readAsync = vi.spyOn(FileHookStateStorage.prototype, "readAsync");
-		await f.tool.execute("no-handlers", args, undefined, undefined, f.ctx);
+		await f.tool.execute("no-handlers", args, undefined, undefined, f.ctx as ExtensionToolContext);
 		await bounded(f.notificationFinished);
 		expect(read).not.toHaveBeenCalled();
 		expect(readAsync).not.toHaveBeenCalled();

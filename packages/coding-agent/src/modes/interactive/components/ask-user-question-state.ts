@@ -95,7 +95,9 @@ export class AskUserQuestionState {
 
 	jumpToQuestion(index: number): void {
 		this.focus = "options";
-		this.activeIndex = index;
+		// A stale caller index must never leave the overlay without an active question.
+		const whole = Number.isFinite(index) ? Math.trunc(index) : 0;
+		this.activeIndex = Math.min(Math.max(0, whole), this.request.questions.length - 1);
 		this.highlightIndex = 0;
 		this.clearTransient();
 	}
@@ -190,12 +192,12 @@ export class AskUserQuestionState {
 		this.notice = undefined;
 	}
 
-	/** Replace the question's answer with typed text; empty text clears it. */
+	/** Replace the question's answer with typed text; empty text is a no-op so existing option selections survive. */
 	setOwnAnswer(questionId: string, text: string): void {
 		const trimmed = text.trim();
+		if (trimmed === "") return;
 		this.selected.delete(questionId);
-		if (trimmed === "") this.texts.delete(questionId);
-		else this.texts.set(questionId, trimmed);
+		this.texts.set(questionId, trimmed);
 		this.notice = undefined;
 	}
 
@@ -245,6 +247,7 @@ export class AskUserQuestionState {
 		const comment = this.comment !== undefined && this.comment.trim() !== "" ? this.comment : undefined;
 		return {
 			status,
+			...(status === "answered" || status === "comment-submitted" ? { resolvedBy: "local_ui" as const } : {}),
 			answers: this.answers(),
 			...(comment !== undefined ? { comment } : {}),
 			unanswered: this.unanswered(),

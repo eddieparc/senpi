@@ -188,13 +188,13 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 |---------|-------------|
 | `/login`, `/logout` | Manage provider credentials |
 | [`/llama`](docs/llama-cpp.md) | Download, load, and unload llama.cpp router models |
-| `/model` | Switch models; Ctrl+S in the picker saves the startup default |
+| `/model` | Switch this session's model; Ctrl+S in the picker, or `/model <id> --default`, also makes it the startup default |
 | `/thinking` | Switch thinking level; Ctrl+S in the picker saves the startup default |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Theme, message delivery, transport, and other preferences |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
-| `/name <name>` | Set session display name |
+| `/rename [name]` | Rename the current session (`/name` is an alias) |
 | `/session` | Show session info (file, ID, messages, tokens, cost) |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/trust` | Save project trust decision for future sessions (restart required) |
@@ -749,11 +749,13 @@ Commands run by the LLM-callable bash tool also receive current session metadata
 |----------|-------------|
 | `PI_SESSION_ID` | Current session ID |
 | `PI_SESSION_FILE` | Absolute session JSONL path; unset for ephemeral sessions |
+| `PI_SESSION_CWD` | Current session working directory |
+| `PI_GOAL_STORE_FILE` | Absolute session goal-store path, including in-memory sessions; the file need not exist yet |
 | `PI_PROVIDER` | Currently selected model provider |
 | `PI_MODEL` | Currently selected model ID |
 | `PI_REASONING_LEVEL` | Current effective reasoning level |
 
-These values are resolved when each command starts. See [Environment Variables](docs/environment-variables.md#bash-tool-session-environment) for semantics, examples, and custom-tool opt-out.
+These values are resolved when each command starts, including terminal-extension PTY bash. Eval kernels snapshot them at kernel start and pass them to their children. See [Environment Variables](docs/environment-variables.md#shell-tool-session-environment) for semantics, examples, and custom-tool opt-out.
 
 ---
 

@@ -1,7 +1,7 @@
 import type { Credential } from "@earendil-works/pi-ai";
 import { accountLabel } from "@earendil-works/pi-ai/auth/pool/slots";
 import type { ExtensionAPI, ExtensionCommandContext } from "../../types.ts";
-import { emitProviderAccountsChanged } from "../claude-sdk-oauth/account-events.ts";
+import { emitProviderAccountsChanged } from "../anthropic-subscription/account-events.ts";
 import {
 	type CursorCliAccountSlot,
 	type CursorCliOauthCredential,
@@ -98,6 +98,7 @@ export function registerCursorCliAccountCommand(pi: ExtensionAPI, deps: CursorCl
 	pi.registerCommand("cursor-account", {
 		description: "List and manage Cursor CLI (OAuth) accounts.",
 		argumentHint: "[list | add | remove <name> | pin <name> | unpin | import | acknowledge | status]",
+		requiresArguments: false,
 		handler: async (rawArgs: string, ctx: ExtensionCommandContext): Promise<void> => {
 			try {
 				const args = parseArgs(rawArgs);

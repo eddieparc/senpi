@@ -5,6 +5,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
+import { readSkillMarkdownSource, shouldSkipSkillWalkDirectoryName } from "./skill-discovery.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /** Max name length per spec */
@@ -68,6 +69,8 @@ export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
 	"disable-model-invocation"?: boolean;
+	"argument-hint"?: string;
+	"requires-arguments"?: boolean;
 	[key: string]: unknown;
 }
 
@@ -78,6 +81,10 @@ export interface Skill {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	/** Usage hint from the `argument-hint` frontmatter. */
+	argumentHint?: string;
+	/** `requires-arguments` frontmatter; defaults to true when a hint is declared, else false. */
+	requiresArguments?: boolean;
 }
 
 export interface LoadSkillsResult {
@@ -221,12 +228,7 @@ function loadSkillsFromDirInternal(
 		}
 
 		for (const entry of entries) {
-			if (entry.name.startsWith(".")) {
-				continue;
-			}
-
-			// Skip node_modules to avoid scanning dependencies
-			if (entry.name === "node_modules") {
+			if (shouldSkipSkillWalkDirectoryName(entry.name)) {
 				continue;
 			}
 
@@ -283,7 +285,7 @@ function loadSkillFromFile(
 
 	let rawContent: string;
 	try {
-		rawContent = readFileSync(filePath, "utf-8");
+		rawContent = readSkillMarkdownSource(filePath);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "failed to read skill file";
 		diagnostics.push({ type: "warning", message, path: filePath });
@@ -330,6 +332,9 @@ function loadSkillFromFile(
 	if (!hasDescription) {
 		return { skill: null, diagnostics };
 	}
+	const argumentHint = frontmatter["argument-hint"];
+	const hasArgumentHint = typeof argumentHint === "string" && argumentHint.trim() !== "";
+	const requiresArguments = frontmatter["requires-arguments"];
 
 	return {
 		skill: {
@@ -339,6 +344,8 @@ function loadSkillFromFile(
 			baseDir: skillDir,
 			sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 			disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+			requiresArguments: typeof requiresArguments === "boolean" ? requiresArguments : hasArgumentHint,
+			...(hasArgumentHint && { argumentHint: argumentHint.trim() }),
 		},
 		diagnostics,
 	};
@@ -374,8 +381,8 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
 		fileReadTool === "read"
-			? "Use the read tool to load a skill's file whenever its description even loosely matches the task - loading an irrelevant skill costs little; missing a relevant one degrades the work."
-			: "Use bash to load a skill's file whenever its description even loosely matches the task - loading an irrelevant skill costs little; missing a relevant one degrades the work.",
+			? "Use the read tool to load a skill's file when its description matches the task and its instructions would change the work; keyword overlap or mere availability is not a reason."
+			: "Use bash to load a skill's file when its description matches the task and its instructions would change the work; keyword overlap or mere availability is not a reason.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
 		"<skill_roots>",

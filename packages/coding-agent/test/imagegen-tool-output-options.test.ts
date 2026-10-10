@@ -1,6 +1,12 @@
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AssistantImages, ImagesContext, ImagesModel, ProviderImagesOptions } from "@earendil-works/pi-ai/compat";
+import type {
+	AssistantImages,
+	ImageApi,
+	ImageModel,
+	ImagesContext,
+	ProviderImagesOptions,
+} from "@earendil-works/pi-ai/compat";
 import { registerImagesApiProvider, unregisterImagesApiProviders } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setImageGenRegistry, setNativeBypass } from "../src/core/extensions/builtin/imagegen/state.ts";
@@ -15,7 +21,7 @@ const stub: { background: AssistantImages["background"]; mimeType: string | unde
 };
 const generate = vi.fn(
 	async (
-		model: ImagesModel<"openai-images">,
+		model: ImageModel<ImageApi>,
 		_context: ImagesContext,
 		options?: ProviderImagesOptions,
 	): Promise<AssistantImages> => ({
@@ -54,6 +60,9 @@ beforeEach(async () => {
 	registerImagesApiProvider({ api: "openai-images", generateImages: generate }, STUB_SOURCE_ID);
 	harness = await createHarness({ extensionFactories: [(pi) => pi.registerTool(generateImageTool)] });
 	await harness.session.bindExtensions({});
+	// generate_image is search-exposed: these tests exercise the tool body directly, so they opt
+	// into the same active set the by-name call would have produced.
+	harness.session.setActiveToolsByName([...harness.session.getActiveToolNames(), "generate_image"]);
 });
 
 afterEach(() => {

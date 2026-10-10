@@ -1,3 +1,6 @@
+import { assertCellLive } from "./cell-run-context.js";
+import { groupSignalNotice, noticeChildProcessGroupSignals, shellCommandText, signalsProcessGroup } from "./group-signal-notice.js";
+
 const SHELL_CONFIG_METHODS = ["env", "cwd", "nothrow", "throws"];
 const SHELL_READ_METHODS = ["text", "json", "lines", "arrayBuffer", "bytes", "blob"];
 // `true | ( … )` hands every command in the template an empty pipe as stdin. The worker thread shares
@@ -26,7 +29,9 @@ export function installShellCapture(options) {
 	bun.$ = capturedShell(originalShell, options);
 	bun.spawn = capturedSpawn(originalSpawn, options, pinEnv);
 	if (originalSpawnSync !== null) bun.spawnSync = capturedSpawnSync(originalSpawnSync, pinEnv);
+	const restoreChildProcessNotice = noticeChildProcessGroupSignals(options.emitText, options.isActive);
 	return () => {
+		restoreChildProcessNotice();
 		bun.$ = originalShell;
 		bun.spawn = originalSpawn;
 		if (originalSpawnSync !== null) bun.spawnSync = originalSpawnSync;
@@ -39,9 +44,11 @@ function isBunRuntime(bun) {
 
 function capturedShell(originalShell, options) {
 	const shell = (strings, ...expressions) => {
+		assertCellLive();
 		if (!options.isActive()) return originalShell(strings, ...expressions);
+		if (signalsProcessGroup(shellCommandText(strings, expressions))) options.emitText("stderr", groupSignalNotice("Bun.$"));
 		const promise = originalShell(isolateStdin(strings), ...expressions);
-		return captureShellPromise(promise, options.emitText);
+		return captureShellPromise(promise, options);
 	};
 	for (const key of Object.keys(originalShell)) shell[key] = originalShell[key];
 	for (const method of SHELL_CONFIG_METHODS) {
@@ -65,13 +72,20 @@ function isolateStdin(strings) {
 	return Object.freeze(Object.assign(cooked, { raw: Object.freeze(raw) }));
 }
 
-function captureShellPromise(promise, emitText) {
+function captureShellPromise(promise, options) {
 	const prototype = Object.getPrototypeOf(promise);
+	let waiting = false;
+	let settled = false;
+	const finish = () => {
+		settled = true;
+		if (waiting) options.onShellWait?.(promise, false);
+		waiting = false;
+	};
 	let echo = true;
 	const echoOnce = (output) => {
 		if (!echo) return;
 		echo = false;
-		emitShellOutput(output, emitText);
+		emitShellOutput(output, options.emitText);
 	};
 	prototype.quiet.call(promise);
 	promise.quiet = function quiet() {
@@ -86,13 +100,19 @@ function captureShellPromise(promise, emitText) {
 		};
 	}
 	promise.then = function then(onFulfilled, onRejected) {
+		if (!waiting && !settled) {
+			waiting = true;
+			options.onShellWait?.(promise, true);
+		}
 		return prototype.then.call(
 			this,
 			(output) => {
+				finish();
 				echoOnce(output);
 				return onFulfilled ? onFulfilled(output) : output;
 			},
 			(error) => {
+				finish();
 				echoOnce(error);
 				if (onRejected) return onRejected(error);
 				throw error;
@@ -119,6 +139,7 @@ function outputText(value) {
 // without an explicit env must get the worker's view pinned too (measured on Bun 1.4.0).
 function capturedSpawnSync(originalSpawnSync, pinEnv) {
 	return (...args) => {
+		assertCellLive();
 		if (!pinEnv) return originalSpawnSync(...args);
 		const [first, second] = args;
 		if (Array.isArray(first)) {
@@ -135,6 +156,7 @@ function capturedSpawnSync(originalSpawnSync, pinEnv) {
 
 function capturedSpawn(originalSpawn, options, pinEnv) {
 	return (...args) => {
+		assertCellLive();
 		if (!options.isActive()) return originalSpawn(...args);
 		const [first, second] = args;
 		let child;
@@ -154,7 +176,7 @@ function capturedSpawn(originalSpawn, options, pinEnv) {
 					? originalSpawn(...args)
 					: originalSpawn(effective);
 		}
-		options.onChild?.(child);
+		options.onChild?.(child, Array.isArray(first) ? second : first);
 		return child;
 	};
 }

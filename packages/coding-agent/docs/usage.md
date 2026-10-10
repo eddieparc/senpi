@@ -42,16 +42,16 @@ Type `/` in the editor to open command completion. Extensions can register custo
 |---------|-------------|
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | [`/llama`](llama-cpp.md) | Download, load, and unload llama.cpp router models |
-| `/model` | Switch models; Ctrl+S in the picker saves the startup default |
-| `/thinking` | Switch thinking level; Ctrl+S in the picker saves the startup default |
+| `/model` | Switch this session's model; Ctrl+S in the picker, or `/model <id> --default`, also makes it the startup default |
+| `/thinking [level]` | Set the thinking level for this session (`/thinking high`), or open the picker with no argument; Ctrl+S in the picker saves it as the startup default |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/reasoning [on\|off]` | Show or toggle reasoning for the current model |
 | `/efforts [level]` | Show or set reasoning effort (graded models only) |
-| `/fast [on\|off]` | Toggle fast mode (OpenAI Codex models, persisted per model) |
+| `/fast [on\|off]` | Toggle fast mode (ChatGPT Subscription models, persisted per model) |
 | `/settings` | Theme, message delivery, transport, and other preferences |
-| `/resume` | Pick from previous sessions |
+| `/resume`, `/sessions` | Pick from previous sessions (`/sessions` is an alias) |
 | `/new` | Start a new session |
-| `/name <name>` | Set session display name |
+| `/rename [name]` | Rename the current session (`/name` is an alias) |
 | `/session` | Show session file, ID, messages, tokens, and cost |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/trust` | Save project trust decision for future sessions |
@@ -71,6 +71,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 
 ### Reasoning and Fast Mode Commands
 
+**Changing the thinking level.** `/thinking <level>` sets it for this session and `/thinking` alone opens a picker. Shift+Tab cycles through the levels the model supports, and `/efforts <level>` sets the reasoning effort for graded models; both remember the level for the current model. The footer shows the active level after the model name.
+
 **`/reasoning [on|off]`** shows or toggles reasoning. Behavior adapts to the active model:
 
 - Models without reasoning support are told plainly.
@@ -81,7 +83,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 
 **`/efforts [minimal|low|medium|high|xhigh|max]`** sets the reasoning effort ladder for graded models. On/off-only models are directed to use `/reasoning` instead. `xhigh` and `max` appear only when the model supports them. No-arg shows current effort and available levels.
 
-**`/fast [on|off]`** toggles OpenAI Codex fast mode (`service_tier: "priority"`). The choice is remembered per model and survives restarts. No-arg toggles. Non-Codex models are told fast mode is unavailable. If the active model selection pins `:priority` via a favorite decorator, `/fast off` is blocked and explains why.
+**`/fast [on|off]`** toggles ChatGPT Subscription fast mode (`service_tier: "priority"`). The choice is remembered per model and survives restarts. No-arg toggles. Non-Codex models are told fast mode is unavailable. If the active model selection pins `:priority` via a favorite decorator, `/fast off` is blocked and explains why.
 
 All three commands work over RPC and headless (no selector opened, status sent as text notifications).
 
@@ -113,6 +115,7 @@ senpi --fork <path|id>    # Fork a session into a new session file
 
 Useful session commands:
 
+- `/resume` (or its alias `/sessions`) opens the same picker as `senpi -r` without leaving the TUI.
 - `/session` shows the current session file and ID.
 - `/tree` navigates the in-file session tree and can summarize abandoned branches. Ctrl+E on an assistant entry edits that response in place of the original (the original stays in the file on an abandoned branch; tool calls in the edited response are dropped).
 - `/fork` creates a new session from an earlier user message.
@@ -120,6 +123,8 @@ Useful session commands:
 - `/compact` summarizes older messages to free context.
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
+To see where a long session's memory goes, start senpi with `SENPI_MEMORY_REPORT=1` and send the process `SIGUSR2` from another terminal (`kill -USR2 <pid>`): it writes a per-layer report (main thread, eval kernels, resident session strings, tool-card render cache, extension figures) to `<session>-artifacts/memory/<iso>.json` and keeps running. Add `SENPI_MEMORY_REPORT_SNAPSHOT=1` for a heap snapshot beside it. Nothing is installed without the flag; see [RPC](rpc.md#memory_report) for the report fields.
+
 
 ## Context Files
 
@@ -185,7 +190,10 @@ senpi update --self             # Update senpi only
 senpi update --extension <src>  # Update one package
 senpi list                      # List installed packages
 senpi config                    # Enable/disable package resources
+senpi config import-pi [file]   # Copy config edited in ~/.pi/agent into ~/.senpi/agent (backs up first)
 ```
+
+After the first start copies an upstream pi install's `~/.pi/agent` into `~/.senpi/agent`, senpi reads only `~/.senpi/agent`. When `auth.json`, `keybindings.json`, `models.json` or `settings.json` in `~/.pi/agent` changes later, the next interactive start warns once per change; `senpi config import-pi` copies the edited files over, or only the ones you name, and never writes to `~/.pi/agent`.
 
 These commands manage senpi packages and `senpi update` can update the senpi CLI installation. To uninstall senpi itself, see [Quickstart](quickstart.md#uninstall). `senpi config` and project package commands accept `--approve`/`--no-approve` to trust or ignore project-local settings for one command. `senpi update` never prompts for project trust.
 
@@ -211,7 +219,7 @@ cat README.md | senpi -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
-| `--provider <name>` | Provider, such as `anthropic`, `openai`, or `google` |
+| `--provider <name>` | Provider, such as `anthropic`, `openai`, or `google`; requires `--model` |
 | `--model <pattern>` | Model pattern or ID; supports `provider/id` and optional `:<thinking>` |
 | `--api-key <key>` | API key, overriding environment variables |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
@@ -226,6 +234,7 @@ cat README.md | senpi -p "Summarize this text"
 | `-r`, `--resume` | Browse and select a session |
 | `--session <path\|id>` | Use a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
+| `--rebind <path\|id>` | Move a session of this repository, recorded at another path (moved or re-cloned), into this directory and continue it |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode; do not save |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
@@ -240,6 +249,14 @@ cat README.md | senpi -p "Summarize this text"
 | `--no-tools`, `-nt` | Disable all tools |
 
 Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+
+#### `grep` tool contract
+
+Use `tool.grep({ pattern, path, glob, ignoreCase, literal, context, before, after, mode, limit, skip, timeoutMs, hidden, gitignore })` inside eval. `pattern` is required; `path` accepts a file, directory, array, or a `<file>:L1-L2` selector. `glob` accepts positive patterns and `!` exclusions. `mode` is `content` (default), `count`, or `files`; `limit` and `skip` paginate file results. `before`/`after` override `context`.
+
+Content output uses `path` blocks with `N: match` and `N- context` rows, followed by a footer such as `[grep: matches=2 files=2 searched=42 elapsedMs=8 engine=native nextSkip=none]`. The footer is always present. Tool results include `details` v1 with structured matches, file counts, scan status, and pagination metadata.
+
+The engine is selected automatically. `SENPI_GREP_ENGINE=auto|native|rg` selects the preferred engine, and `SENPI_GREP_NATIVE_PATH` overrides the native addon path. Native search honors filesystem policy and ignore files; ripgrep is the fallback.
 
 ### Resource Options
 

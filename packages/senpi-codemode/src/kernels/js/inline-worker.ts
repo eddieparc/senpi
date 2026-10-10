@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { MessagePort } from "node:worker_threads";
 import type { HostToKernelMessage, KernelToHostMessage } from "../../bridge/protocol.ts";
 import { type CodemodeRuntimeAssetEnvironment, requireCodemodeRuntimeAsset } from "../shared/runtime-asset.ts";
 import type { JavaScriptKernelMode } from "./kernel-contract.ts";
@@ -18,7 +19,9 @@ export function resolveInlineWorkerEntryUrl(options: JavaScriptInlineWorkerEntry
 
 export interface WorkerLike {
 	readonly mode: JavaScriptKernelMode;
-	postMessage(message: HostToKernelMessage): void;
+	/** The child pid when `mode` is `"process"`; the slot reports it for orphan accounting after a crash. */
+	readonly pid?: number;
+	postMessage(message: HostToKernelMessage, transfer?: readonly MessagePort[]): void;
 	onMessage(handler: (message: KernelToHostMessage) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
 	terminate(): Promise<void>;

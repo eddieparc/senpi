@@ -35,6 +35,9 @@ senpi app-server --listen stdio://
 `unix:///abs/path` in the `--listen` grammar for local-control socket addresses, but this document does not cover
 daemon lifecycle or control-socket management.
 
+Load extensions into every thread with repeated `--extension <path>`, the same sources the global flag accepts.
+`senpi app-server daemon start` passes them to the daemon and records them, so `restart` keeps them.
+
 ## Protocol Overview
 
 App Server mode speaks JSON-RPC-shaped messages without a `jsonrpc` field. A request has `id`, `method`, and optional
@@ -352,6 +355,11 @@ Response:
 {"id":12,"error":{"code":-32600,"message":"Thread not found: missing-thread"}}
 ```
 
+Input whose first token looks like a command that nothing handles (`/foo bar`; `/tmp/a.txt` is a path) is refused
+before any turn starts: no `turn/started` or user item is emitted, and the request fails with code `-32602` and
+`data: {"errorCode": "unknown_command", "command", "suggestions", "reason"}` (the same fields as RPC `prompt`).
+To send such text as a message, repeat the request with the senpi extension field `"unknownCommandAsText": true`.
+
 ### turn/steer
 
 Queue steering text for an active turn. The live no-token example documents the current error response when the thread
@@ -441,7 +449,7 @@ internal-error path; a listed method is not silently treated as unsupported.
 | `thread/unsubscribe` | Detaches only the calling connection; a now-idle thread may unload later. |
 | `thread/compact/start` | Acknowledges immediately and compacts the loaded thread. Context-compaction items carry progress; Senpi intentionally does not emit `thread/compacted`. |
 | `thread/goal/set` | Persists a goal and broadcasts `thread/goal/updated` after the response. Accepts `active`, `paused`, and `complete`; `blocked`, `usageLimited`, and `budgetLimited` are rejected. `tokenBudget` follows omit/keep, `null`/clear, number/set semantics. |
-| `thread/goal/get` | Reads the persisted thread goal or `null`. |
+| `thread/goal/get` | Reads the thread goal or `null`. A stale-stopped goal is projected as `paused`; its committed usage remains unchanged and reopening does not restart it. |
 | `thread/goal/clear` | Clears a goal and broadcasts `thread/goal/cleared` only when a goal existed. |
 | `thread/metadata/update` | Persists `gitInfo` in an app-server sidecar and returns the updated wire thread. |
 | `turn/start` | Starts a turn on a loaded thread. |

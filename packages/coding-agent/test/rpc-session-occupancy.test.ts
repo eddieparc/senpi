@@ -60,11 +60,13 @@ function createRuntimeFactory(): {
 			runtimeDisposals: 0,
 		};
 		states.push(state);
+		const flagValues = new Map<string, boolean | string>();
 		return {
 			session: {
 				sessionManager: options.sessionManager,
 				agentDir: options.agentDir,
 				isFastModeActive: () => false,
+				agent: { state: {} },
 				getContextUsage: () => undefined,
 				favoriteModels: [],
 				scopedModels: [],
@@ -85,7 +87,13 @@ function createRuntimeFactory(): {
 						hasActiveWakeSource: state.hasBackgroundJob,
 					});
 				},
-				extensionRunner: { hasHandlers: () => false, emit: async () => {} },
+				// Records flags like ExtensionRunner: an attach and a runtime replacement set the permission preset here.
+				extensionRunner: {
+					hasHandlers: () => false,
+					emit: async () => {},
+					setFlagValue: (name: string, value: boolean | string) => flagValues.set(name, value),
+					getFlagValues: () => new Map(flagValues),
+				},
 				abort: async () => {},
 				abortBash: () => {},
 				waitForIdle: async () => {},

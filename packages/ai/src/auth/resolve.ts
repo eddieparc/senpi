@@ -1,6 +1,7 @@
 import type { ProviderEnv } from "../types.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
-import { formatThrownValue } from "../utils/diagnostics.ts";
+import { ModelsError } from "../utils/models-error.ts";
+import { classifyOAuthRefreshFailure, OAuthRefreshUnavailableError } from "../utils/oauth-refresh-error.ts";
 import {
 	OAuthRefreshExchangeError,
 	OAuthRefreshStoreError,
@@ -8,6 +9,9 @@ import {
 	refreshOAuthCredential,
 } from "./oauth-refresh.ts";
 import { projectSlot } from "./pool/slots.ts";
+
+export { ModelsError, type ModelsErrorCode } from "../utils/models-error.ts";
+
 import type {
 	ApiKeyAuth,
 	ApiKeyCredential,
@@ -20,8 +24,6 @@ import type {
 	ProviderAuth,
 } from "./types.ts";
 
-export type ModelsErrorCode = "model_source" | "model_validation" | "provider" | "stream" | "auth" | "oauth";
-
 export interface AuthResolutionOverrides {
 	apiKey?: string;
 	env?: ProviderEnv;
@@ -33,6 +35,12 @@ export interface AuthResolutionOverrides {
 	 * ambient env, so a slot-scoped request can never silently switch identities.
 	 */
 	slotName?: string;
+	/**
+	 * An access token the provider just refused with one of its
+	 * `OAuthAuth.rejectedTokenStatuses`. A stored OAuth credential still carrying it
+	 * is re-exchanged regardless of its expiry; one already rotated is used as is.
+	 */
+	rejectedAccess?: string;
 	signal?: AbortSignal;
 }
 
@@ -48,26 +56,8 @@ export function providerNotConfiguredMessage(providerId: string): string {
 	return `${PROVIDER_NOT_CONFIGURED_PREFIX}${providerId}`;
 }
 
-export class ModelsError extends Error {
-	readonly code: ModelsErrorCode;
-
-	constructor(code: ModelsErrorCode, message: string, options?: { cause?: unknown }) {
-		super(withCauseDetail(message, options?.cause), options);
-		this.name = "ModelsError";
-		this.code = code;
-	}
-}
-
-/** Callers surface `error.message` only, so keep the underlying reason in it. */
-function withCauseDetail(message: string, cause: unknown): string {
-	if (cause === undefined || cause === null) return message;
-	const detail = formatThrownValue(cause).trim();
-	if (!detail || message.includes(detail)) return message;
-	return `${message}: ${detail}`;
-}
-
 /**
- * Auth resolution shared by the `Models` and `ImagesModels` collections.
+ * Auth resolution shared by all operations in a `Models` collection.
  * A stored credential owns the provider: ambient/env is consulted only when
  * nothing is stored. No silent env fallback after a failed refresh or for a
  * credential type without a matching handler.
@@ -126,6 +116,7 @@ async function resolveProviderAuthWithSignal(
 				signal,
 				overrides?.minOAuthValidityMs,
 				slotName,
+				overrides?.rejectedAccess,
 			);
 		}
 		if (projected.type === "api_key" && provider.auth.apiKey) {
@@ -145,6 +136,8 @@ async function resolveProviderAuthWithSignal(
 				overrides?.env,
 				signal,
 				overrides?.minOAuthValidityMs,
+				undefined,
+				overrides?.rejectedAccess,
 			);
 		}
 		if (stored.type === "api_key" && provider.auth.apiKey) {
@@ -187,6 +180,9 @@ const DEFAULT_OAUTH_MINIMUM_VALIDITY_MS = 5 * 60 * 1000;
 export function oauthRefreshModelsError(error: unknown, providerId: string): ModelsError {
 	if (error instanceof ModelsError) return error;
 	if (error instanceof OAuthRefreshExchangeError) {
+		if (classifyOAuthRefreshFailure(error.cause) === "transient") {
+			return new OAuthRefreshUnavailableError(providerId, error.cause);
+		}
 		return new ModelsError("oauth", `OAuth refresh failed for ${providerId}`, { cause: error.cause });
 	}
 	const cause = error instanceof OAuthRefreshStoreError ? error.cause : error;
@@ -208,12 +204,15 @@ async function resolveStoredOAuth(
 	signal: AbortSignal,
 	minOAuthValidityMs?: number,
 	slotName?: string,
+	rejectedAccess?: string,
 ): Promise<AuthResult | undefined> {
 	const minimumValidityMs = Math.max(DEFAULT_OAUTH_MINIMUM_VALIDITY_MS, minOAuthValidityMs ?? 0);
 	const expiresSoon = (credential: OAuthCredential) => Date.now() + minimumValidityMs >= credential.expires;
+	const isStale = (credential: OAuthCredential) =>
+		expiresSoon(credential) || (rejectedAccess !== undefined && credential.access === rejectedAccess);
 	let credential = stored;
 
-	if (expiresSoon(credential)) {
+	if (isStale(credential)) {
 		let post: Credential | undefined;
 		try {
 			post = await refreshOAuthCredential({
@@ -222,11 +221,12 @@ async function resolveStoredOAuth(
 				oauth,
 				stale: credential,
 				slotName,
-				isStale: expiresSoon,
+				isStale,
 				signal,
 				owning: true,
 			});
 		} catch (error) {
+			signal.throwIfAborted();
 			throw oauthRefreshModelsError(error, providerId);
 		}
 		if (post?.type !== "oauth") return undefined; // logged out meanwhile

@@ -4,17 +4,18 @@ import {
 	createProvider,
 	type OAuthAuth,
 	type OAuthCredential,
+	type ProviderStreams,
 } from "@earendil-works/pi-ai";
 import { listSlots } from "@earendil-works/pi-ai/auth/pool/slots";
 import { describe, expect, it } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { renameCredentialAccount } from "../../../src/core/credential-accounts.ts";
 import {
-	type ClaudeSdkOauthCredential,
+	type AnthropicSubscriptionCredential,
 	SENTINEL_OAUTH_FIELDS,
-} from "../../../src/core/extensions/builtin/claude-sdk-oauth/accounts.ts";
-import { createOAuthConfig } from "../../../src/core/extensions/builtin/claude-sdk-oauth/oauth-login.ts";
-import { composedProvider } from "../../support/claude-sdk-oauth-provider.ts";
+} from "../../../src/core/extensions/builtin/anthropic-subscription/accounts.ts";
+import { createOAuthConfig } from "../../../src/core/extensions/builtin/anthropic-subscription/oauth-login.ts";
+import { composedProvider } from "../../support/anthropic-subscription-provider.ts";
 
 const fresh = { type: "oauth" as const, access: "fake-access", refresh: "fake-refresh", expires: 4102444800000 };
 const flow: OAuthAuth = {
@@ -22,6 +23,16 @@ const flow: OAuthAuth = {
 	login: async () => fresh,
 	refresh: async (current) => current,
 	toAuth: async (current) => ({ apiKey: current.access }),
+};
+// createProvider requires a concrete api/images/classifiers implementation (upstream v6 provider
+// shape; empty maps are rejected). These auth-only fixtures carry no models, so nothing ever streams.
+const authOnlyStreams: ProviderStreams = {
+	stream: () => {
+		throw new Error("auth-only fixture provider has no models to stream");
+	},
+	streamSimple: () => {
+		throw new Error("auth-only fixture provider has no models to stream");
+	},
 };
 function interaction(receipts: unknown[], answer = "second"): AuthInteraction {
 	return { prompt: async () => answer, notify: () => {}, onAccountCommitted: (receipt) => receipts.push(receipt) };
@@ -34,23 +45,25 @@ describe("committed account receipts", () => {
 		const models = createModels({ credentials: storage });
 		models.setProvider(
 			createProvider({
-				id: "openai-codex",
+				id: "chatgpt-subscription",
 				name: "Fake Codex",
 				baseUrl: "https://example.invalid",
 				auth: { oauth: flow },
 				models: [],
-				api: {},
+				api: authOnlyStreams,
 			}),
 		);
 		const receipts: unknown[] = [];
-		await models.login("openai-codex", "oauth", interaction(receipts));
-		await renameCredentialAccount(storage, "openai-codex", "default", "Personal");
-		await models.login("openai-codex", "oauth", interaction(receipts));
+		await models.login("chatgpt-subscription", "oauth", interaction(receipts));
+		await renameCredentialAccount(storage, "chatgpt-subscription", "default", "Personal");
+		await models.login("chatgpt-subscription", "oauth", interaction(receipts));
 		expect(receipts).toEqual([
-			{ providerId: "openai-codex", name: "default", origin: "generated" },
-			{ providerId: "openai-codex", name: "login-2", origin: "generated" },
+			{ providerId: "chatgpt-subscription", name: "default", origin: "generated" },
+			{ providerId: "chatgpt-subscription", name: "login-2", origin: "generated" },
 		]);
-		expect(listSlots(storage.get("openai-codex")).map(({ name, displayName }) => ({ name, displayName }))).toEqual([
+		expect(
+			listSlots(storage.get("chatgpt-subscription")).map(({ name, displayName }) => ({ name, displayName })),
+		).toEqual([
 			{ name: "default", displayName: "Personal" },
 			{ name: "login-2", displayName: undefined },
 		]);
@@ -62,23 +75,24 @@ describe("committed account receipts", () => {
 			const storage = AuthStorage.inMemory();
 			const models = createModels({ credentials: storage });
 			const config = createOAuthConfig({
-				readCurrent: async () => storage.get("claude-sdk-oauth") as ClaudeSdkOauthCredential | undefined,
+				readCurrent: async () =>
+					storage.get("anthropic-subscription") as AnthropicSubscriptionCredential | undefined,
 				readAnthropicCredential: async () => (importFirst ? fresh : undefined),
 				loginFlow: flow,
 			});
 			models.setProvider(composedProvider(async () => false, { oauth: config }));
 			const receipts: unknown[] = [];
-			await models.login("claude-sdk-oauth", "oauth", interaction(receipts, "yes"));
+			await models.login("anthropic-subscription", "oauth", interaction(receipts, "yes"));
 			const first = importFirst ? "imported-anthropic" : "default";
-			await renameCredentialAccount(storage, "claude-sdk-oauth", first, "Personal");
-			await models.login("claude-sdk-oauth", "oauth", interaction(receipts));
+			await renameCredentialAccount(storage, "anthropic-subscription", first, "Personal");
+			await models.login("anthropic-subscription", "oauth", interaction(receipts));
 			// The Claude envelope adapter owns slot naming end to end (it prompts
 			// for the second id itself), so both receipts are provider-origin.
 			expect(receipts).toEqual([
-				{ providerId: "claude-sdk-oauth", name: first, origin: "provider" },
-				{ providerId: "claude-sdk-oauth", name: "second", origin: "provider" },
+				{ providerId: "anthropic-subscription", name: first, origin: "provider" },
+				{ providerId: "anthropic-subscription", name: "second", origin: "provider" },
 			]);
-			const saved = storage.get("claude-sdk-oauth") as ClaudeSdkOauthCredential;
+			const saved = storage.get("anthropic-subscription") as AnthropicSubscriptionCredential;
 			expect(saved).toMatchObject(SENTINEL_OAUTH_FIELDS);
 			expect(saved.accounts?.map(({ name, displayName }) => ({ name, displayName }))).toEqual([
 				{ name: first, displayName: "Personal" },
@@ -104,15 +118,15 @@ describe("committed account receipts", () => {
 		});
 		models.setProvider(
 			createProvider({
-				id: "openai-codex",
+				id: "chatgpt-subscription",
 				name: "Fake",
 				baseUrl: "https://example.invalid",
 				auth: { oauth: flow },
 				models: [],
-				api: {},
+				api: authOnlyStreams,
 			}),
 		);
-		await expect(models.login("openai-codex", "oauth", interaction(receipts))).rejects.toThrow();
+		await expect(models.login("chatgpt-subscription", "oauth", interaction(receipts))).rejects.toThrow();
 		expect(receipts).toEqual([]);
 	});
 
@@ -129,7 +143,7 @@ describe("committed account receipts", () => {
 				baseUrl: "https://example.invalid",
 				auth: { oauth: { ...flow, login: async () => result } },
 				models: [],
-				api: {},
+				api: authOnlyStreams,
 			}),
 		);
 		const receipts: unknown[] = [];

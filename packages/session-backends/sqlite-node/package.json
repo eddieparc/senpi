@@ -18,7 +18,7 @@
 	],
 	"scripts": {
 		"clean": "node -e \"import('node:fs/promises').then(fs=>fs.rm('dist',{recursive:true,force:true}))\"",
-		"build": "tsgo -p tsconfig.build.json && node scripts/copy-migrations.mjs",
+		"build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
 		"bench:session:timing": "vitest bench --config vitest.benchmark.config.ts",
 		"test": "vitest --run",
 		"coverage": "vitest --run --coverage",
@@ -35,12 +35,12 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "^2026.9.13",
-		"@earendil-works/pi-agent-core": "^2026.9.13"
+		"@earendil-works/pi-ai": "^2026.10.10-12",
+		"@earendil-works/pi-agent-core": "^2026.10.10-12"
 	},
 	"devDependencies": {
-		"@vitest/coverage-v8": "4.1.11",
-		"vitest": "4.1.11"
+		"@vitest/coverage-v8": "5.0.1",
+		"vitest": "5.0.1"
 	},
 	"private": true
 }

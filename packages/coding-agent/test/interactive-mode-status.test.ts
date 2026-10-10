@@ -15,9 +15,10 @@ import { APP_TITLE } from "../src/config.ts";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import type { QuietStartup } from "../src/core/settings-manager.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode, showsStartupDetails, showsStartupHeader } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -726,7 +727,7 @@ describe("InteractiveMode.getWorkingIndicatorOptions", () => {
 		// Given
 		const fakeThis: any = {
 			workingIndicatorOptions: undefined,
-			sessionManager: { getEntries: () => [] },
+			sessionManager: { getEntries: () => [], getEntryCount: () => 0 },
 			getWorkingElapsedSeconds: () => 7,
 		};
 
@@ -761,7 +762,7 @@ describe("InteractiveMode.getWorkingIndicatorOptions", () => {
 		initTheme("dark");
 		const fakeThis: any = {
 			workingIndicatorOptions: undefined,
-			sessionManager: { getEntries: () => [] },
+			sessionManager: { getEntries: () => [], getEntryCount: () => 0 },
 			getWorkingElapsedSeconds: () => 7,
 		};
 
@@ -822,7 +823,7 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 		).prototype.createBaseAutocompleteProvider;
 		const models = [
 			{ id: "gpt-5.2-codex", provider: "github-copilot", name: "GPT-5.2 Codex" },
-			{ id: "gpt-5.5", provider: "openai-codex", name: "GPT-5.5" },
+			{ id: "gpt-5.5", provider: "chatgpt-subscription", name: "GPT-5.5" },
 		];
 		const fakeThis: FakeInteractiveMode = {
 			session: {
@@ -839,15 +840,17 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 		};
 
 		const provider = createBaseAutocompleteProvider.call(fakeThis);
-		const line = "/model codexgpt";
+		// `subgpt` crosses the boundary: "sub" comes from the PROVIDER id
+		// (chatgpt-subscription) and "gpt" from the MODEL id, which is exactly the
+		// ordering this test is named for. The previous query "codexgpt" also matched
+		// github-copilot/gpt-5.2-codex, but only because "codex" happened to appear in
+		// BOTH the old provider id and that model id - incidental, not the contract.
+		const line = "/model subgpt";
 		const suggestions = await provider.getSuggestions([line], 0, line.length, {
 			signal: new AbortController().signal,
 		});
 
-		expect(suggestions?.items.map((item) => item.value)).toEqual([
-			"openai-codex/gpt-5.5",
-			"github-copilot/gpt-5.2-codex",
-		]);
+		expect(suggestions?.items.map((item) => item.value)).toEqual(["chatgpt-subscription/gpt-5.5"]);
 	});
 
 	test("matches login command arguments by provider id and name", async () => {
@@ -911,7 +914,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 	});
 
 	function createShowLoadedResourcesThis(options: {
-		quietStartup: boolean;
+		quietStartup: QuietStartup;
 		verbose?: boolean;
 		toolOutputExpanded?: boolean;
 		cwd?: string;
@@ -1631,6 +1634,29 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
+	});
+
+	test("hides resource listing but keeps the startup header with header-only quiet startup", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: "header",
+			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
+		expect(showsStartupHeader(false, "header")).toBe(true);
+		expect(showsStartupDetails(false, "header")).toBe(false);
+	});
+
+	test("hides the startup header with full quiet startup unless verbose", () => {
+		expect(showsStartupHeader(false, true)).toBe(false);
+		expect(showsStartupHeader(true, true)).toBe(true);
+		expect(showsStartupDetails(true, "header")).toBe(true);
+		expect(showsStartupHeader(false, false)).toBe(true);
+		expect(showsStartupDetails(false, false)).toBe(true);
 	});
 
 	test("still shows diagnostics on quiet startup when requested", () => {

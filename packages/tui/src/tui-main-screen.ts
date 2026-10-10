@@ -32,10 +32,18 @@ export class TuiMainScreen extends TuiBase {
 	readonly mode = "regular" as const;
 	private trackingEnabled = false;
 	private readonly clicks = new MouseClickSynthesizer();
-	private mousePress?: { target: TuiMouseDispatchTarget; epoch: number; revision: number; x: number; y: number };
-	private layoutRevision = 0;
-	private committedMouseLines: string[] = [];
-	private committedMouseComponents: Component[] = [];
+	/**
+	 * A press stays clickable only while the committed frame and component tree it hit are unchanged.
+	 * Both are captured at press time and compared at release, so ordinary frames pay nothing for it.
+	 */
+	private mousePress?: {
+		target: TuiMouseDispatchTarget;
+		epoch: number;
+		frame: readonly string[];
+		components: readonly Component[];
+		x: number;
+		y: number;
+	};
 
 	constructor(...args: ConstructorParameters<typeof TuiBase>) {
 		super(...args);
@@ -81,27 +89,36 @@ export class TuiMainScreen extends TuiBase {
 		}
 		super.doRender();
 		this.noteCommittedMouseFrame();
+		this.calibrateMouseAnchor();
+	}
+
+	private collectMouseComponents(): Component[] {
 		const components: Component[] = [];
 		const visit = (component: Component): void => {
 			components.push(component);
 			if (component instanceof Container) for (const child of component.children) visit(child);
 		};
 		for (const root of this.getMouseLayoutRoots()) visit(root);
-		if (
-			this.previousLines.length !== this.committedMouseLines.length ||
-			this.previousLines.some((line, index) => line !== this.committedMouseLines[index]) ||
-			components.length !== this.committedMouseComponents.length ||
-			components.some((component, index) => component !== this.committedMouseComponents[index])
-		) {
-			this.layoutRevision++;
+		return components;
+	}
+
+	private pressLayoutUnchanged(press: { frame: readonly string[]; components: readonly Component[] }): boolean {
+		const lines = this.previousLines;
+		if (press.frame !== lines) {
+			if (press.frame.length !== lines.length) return false;
+			for (let index = 0; index < lines.length; index++) if (press.frame[index] !== lines[index]) return false;
 		}
-		this.committedMouseLines = [...this.previousLines];
-		this.committedMouseComponents = components;
-		this.calibrateMouseAnchor();
+		const components = this.collectMouseComponents();
+		return (
+			components.length === press.components.length &&
+			components.every((component, index) => component === press.components[index])
+		);
 	}
 
 	private applyMouseResult(result: TuiMouseDispatchResult | undefined): void {
-		if (result?.focus) this.setFocus(this.resolveMouseFocusTarget(result.focusTarget ?? result.target.component));
+		if (!result?.focus) return;
+		const target = this.resolveMouseFocusTarget(result.focusTarget ?? result.target.component);
+		if (target) this.setFocus(target);
 	}
 
 	private handleMouseInput(data: string): { consume: boolean } {
@@ -132,7 +149,8 @@ export class TuiMainScreen extends TuiBase {
 				this.mousePress = {
 					target: result.target,
 					epoch: this.placementEpoch,
-					revision: this.layoutRevision,
+					frame: this.previousLines,
+					components: this.collectMouseComponents(),
 					x: raw.x,
 					y: raw.y,
 				};
@@ -145,7 +163,7 @@ export class TuiMainScreen extends TuiBase {
 			if (
 				!press ||
 				press.epoch !== this.placementEpoch ||
-				press.revision !== this.layoutRevision ||
+				!this.pressLayoutUnchanged(press) ||
 				press.x !== raw.x ||
 				press.y !== raw.y
 			) {
@@ -155,7 +173,11 @@ export class TuiMainScreen extends TuiBase {
 			const count = this.clicks.release(raw, press.target.component, this.placementEpoch);
 			if (count !== undefined) {
 				const click: TuiMouseEvent = { ...event, type: "click", clickCount: count };
-				this.applyMouseResult(dispatchMouseEvent(press.target.component, retargetMouseEvent(click, press.target)));
+				// A click handler that moves focus (an ask-user submit restoring the composer) owns the
+				// outcome; re-applying the click target afterwards would steal focus back from it.
+				const focusBeforeClick = this.getFocusedComponent();
+				const clickResult = dispatchMouseEvent(press.target.component, retargetMouseEvent(click, press.target));
+				if (this.getFocusedComponent() === focusBeforeClick) this.applyMouseResult(clickResult);
 				this.requestRender();
 			}
 		}

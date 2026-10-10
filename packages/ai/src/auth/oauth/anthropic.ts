@@ -5,6 +5,7 @@
  * It is only intended for CLI use, not browser environments.
  */
 
+import { OAuthTokenEndpointError } from "../../utils/oauth-refresh-error.ts";
 import { getProviderEnvValue } from "../../utils/provider-env.ts";
 import type { OAuthAuth, OAuthCredential, ProviderAuthInteraction } from "../types.ts";
 import {
@@ -37,6 +38,10 @@ const CALLBACK_HOST = getProviderEnvValue("PI_OAUTH_CALLBACK_HOST") || "127.0.0.
  * redirect on this machine with "State mismatch".
  */
 const LOGIN_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+/** Anthropic page that shows the authorization code to copy (browser on another machine). */
+const COPY_CODE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+const ANTHROPIC_BROWSER_LOGIN_METHOD = "browser";
+const ANTHROPIC_COPY_CODE_LOGIN_METHOD = "copy_code";
 const SCOPES =
 	"org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 async function getNodeApis(): Promise<NodeApis> {
@@ -67,7 +72,10 @@ async function postJson(url: string, body: Record<string, string | number>, sign
 	const responseBody = await response.text();
 
 	if (!response.ok) {
-		throw new Error(`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`);
+		throw new OAuthTokenEndpointError(
+			`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`,
+			response.status,
+		);
 	}
 
 	return responseBody;
@@ -97,6 +105,7 @@ async function exchangeAuthorizationCode(
 	} catch (error) {
 		throw new Error(
 			`Token exchange request failed. url=${TOKEN_URL}; redirect_uri=${redirectUri}; response_type=authorization_code; details=${formatErrorDetails(error)}`,
+			{ cause: error },
 		);
 	}
 
@@ -219,6 +228,43 @@ function loginTimedOutMessage(): string {
 	return `Anthropic login timed out after ${minutes} minutes without a browser callback or a pasted redirect URL. Run the login again.`;
 }
 
+async function loginAnthropicCopyCode(interaction: ProviderAuthInteraction): Promise<OAuthCredential> {
+	const { verifier, challenge } = await generatePKCE();
+	const authParams = new URLSearchParams({
+		code: "true",
+		client_id: CLIENT_ID,
+		response_type: "code",
+		redirect_uri: COPY_CODE_REDIRECT_URI,
+		scope: SCOPES,
+		code_challenge: challenge,
+		code_challenge_method: "S256",
+		state: verifier,
+	});
+	interaction.notify({
+		type: "auth_url",
+		url: `${AUTHORIZE_URL}?${authParams.toString()}`,
+		instructions: "Complete login in your browser, then copy the code Anthropic shows and paste it here.",
+	});
+
+	const input = await interaction.prompt({
+		type: "manual_code",
+		message: "Paste the code Anthropic shows after you sign in:",
+		placeholder: "code#state",
+		signal: interaction.signal,
+	});
+	const parsed = parseAuthorizationInput(input);
+	if (parsed.state && parsed.state !== verifier) throw new Error("OAuth state mismatch");
+	if (!parsed.code) throw new Error("Missing authorization code");
+	interaction.notify({ type: "progress", message: "Exchanging authorization code for tokens..." });
+	return await exchangeAuthorizationCode(
+		parsed.code,
+		parsed.state ?? verifier,
+		verifier,
+		COPY_CODE_REDIRECT_URI,
+		interaction.signal,
+	);
+}
+
 /**
  * Refresh Anthropic OAuth token
  */
@@ -235,7 +281,10 @@ async function refreshAnthropicToken(refreshToken: string, signal: AbortSignal):
 			signal,
 		);
 	} catch (error) {
-		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
+		throw new Error(
+			`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`,
+			{ cause: error },
+		);
 	}
 
 	let data: { access_token: string; refresh_token: string; expires_in: number; scope?: string };
@@ -263,7 +312,27 @@ async function refreshAnthropicToken(refreshToken: string, signal: AbortSignal):
 export const anthropicOAuth: OAuthAuth = {
 	name: "Anthropic (Claude Pro/Max)",
 	isSubscription: true,
-	login: loginAnthropic,
+
+	async login(interaction) {
+		const method = await interaction.prompt({
+			type: "select",
+			message: "Select Anthropic login method:",
+			options: [
+				{ id: ANTHROPIC_BROWSER_LOGIN_METHOD, label: "Browser login (default)" },
+				{ id: ANTHROPIC_COPY_CODE_LOGIN_METHOD, label: "Copy code login (headless)" },
+			],
+		});
+
+		if (method === ANTHROPIC_COPY_CODE_LOGIN_METHOD) {
+			return loginAnthropicCopyCode(interaction);
+		}
+		if (method !== ANTHROPIC_BROWSER_LOGIN_METHOD) {
+			throw new Error(`Unknown Anthropic login method: ${method}`);
+		}
+
+		return loginAnthropic(interaction);
+	},
+
 	refresh: (credential, signal) => refreshAnthropicToken(credential.refresh, signal),
 
 	async toAuth(credential) {
